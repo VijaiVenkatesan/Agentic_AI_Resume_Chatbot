@@ -12,31 +12,17 @@ from pathlib import Path
 
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
-    """Extract text from PDF using multiple methods"""
+    """Extract text from PDF using PyPDF2"""
     text = ""
-
-    # Method 1: pdfplumber (better for structured PDFs)
     try:
-        import pdfplumber
-        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n\n"
-    except Exception:
-        pass
-
-    # Method 2: PyPDF2 fallback
-    if not text.strip():
-        try:
-            from PyPDF2 import PdfReader
-            reader = PdfReader(io.BytesIO(file_bytes))
-            for page in reader.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n\n"
-        except Exception:
-            pass
+        from PyPDF2 import PdfReader
+        reader = PdfReader(io.BytesIO(file_bytes))
+        for page in reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n\n"
+    except Exception as e:
+        text = f"Error reading PDF: {str(e)}"
 
     return text.strip()
 
@@ -212,5 +198,6 @@ def process_uploaded_file(
 
     except Exception as e:
         result["error"] = str(e)
+
 
     return result
