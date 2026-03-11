@@ -1,8 +1,8 @@
 streamlit==1.40.0
-langchain==0.3.25
-langchain-community==0.3.25
-langchain-core==0.3.44
-langchain-text-splitters==0.3.8
+langchain>=0.3.25
+langchain-community>=0.3.25
+langchain-core>=0.3.58
+langchain-text-splitters>=0.3.8
 chromadb==0.6.3
 requests>=2.31.0
 numpy<2.0.0
