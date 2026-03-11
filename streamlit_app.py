@@ -307,31 +307,31 @@ def display_trace(steps, tools_used):
 if not st.session_state.resume_loaded:
     st.markdown("""
     <div style="background:linear-gradient(135deg,#f5f7fa,#e4e8ec);padding:3rem;border-radius:1rem;text-align:center;margin:2rem 0;">
-        <h2>📄 Upload a Resume to Get Started</h2>
-        <p style="font-size:1.1rem;color:#555;">
+        <h2 style="color:#1e3a8a;">📄 Upload a Resume to Get Started</h2>
+        <p style="font-size:1.1rem;color:#1f2937;">
             Upload <strong>any resume</strong> in any format and ask questions using
             <strong>Agentic AI</strong> with <strong>MCP tools</strong>.
         </p>
         <br>
-        <p><strong>Supported Formats:</strong></p>
-        <ul style="text-align:left;display:inline-block;">
+        <p style="color:#1f2937;"><strong>Supported Formats:</strong></p>
+        <ul style="text-align:left;display:inline-block;color:#374151;">
             <li>📕 <strong>PDF</strong> — Most common resume format</li>
             <li>📘 <strong>DOCX</strong> — Microsoft Word documents</li>
             <li>📝 <strong>TXT</strong> — Plain text files</li>
             <li>🖼️ <strong>Images</strong> — JPG, PNG, WEBP (OCR via AI Vision)</li>
         </ul>
         <br><br>
-        <p><strong>🔧 6 MCP Tools:</strong></p>
-        <ul style="text-align:left;display:inline-block;">
-            <li>📄 Resume Search — RAG semantic search</li>
-            <li>📊 Skill Analyzer — Match skills vs job requirements</li>
-            <li>💼 Experience Calculator — Breakdown by years/domain</li>
-            <li>📝 Cover Letter Generator — Tailored cover letters</li>
-            <li>👤 Profile Summary — LinkedIn/portfolio bios</li>
-            <li>🎯 Job Matcher — Job fit scoring</li>
+        <p style="color:#1f2937;"><strong>🔧 6 MCP Tools:</strong></p>
+        <ul style="text-align:left;display:inline-block;color:#374151;">
+            <li>📄 <strong>Resume Search</strong> — RAG semantic search</li>
+            <li>📊 <strong>Skill Analyzer</strong> — Match skills vs job requirements</li>
+            <li>💼 <strong>Experience Calculator</strong> — Breakdown by years/domain</li>
+            <li>📝 <strong>Cover Letter Generator</strong> — Tailored cover letters</li>
+            <li>👤 <strong>Profile Summary</strong> — LinkedIn/portfolio bios</li>
+            <li>🎯 <strong>Job Matcher</strong> — Job fit scoring</li>
         </ul>
         <br><br>
-        <p><em>👈 Upload a resume using the sidebar to begin!</em></p>
+        <p style="color:#1f2937;"><em>👈 Upload a resume using the sidebar to begin!</em></p>
     </div>
     """, unsafe_allow_html=True)
     st.stop()
@@ -431,4 +431,5 @@ st.markdown("""
 <div style="text-align:center;color:#888;font-size:.85rem;">
     Built with ❤️ using Agentic AI + MCP + RAG + Groq | 100% Free
 </div>
+
 """, unsafe_allow_html=True)
