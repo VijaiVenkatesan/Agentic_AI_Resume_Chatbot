@@ -296,9 +296,19 @@ def display_trace(steps, tools_used):
             elif s.step_type == "tool_call":
                 status = "✅" if s.success else "❌"
                 extra = f" — {s.tool_name} {status}"
+            
             st.markdown(f"""
-            <div class="agent-step {cls}">
-                <strong>{icon} Step {i+1}: {label}{extra}</strong> ({s.duration}s)
+            <div class="agent-step {cls}" style="
+                background-color: #f8f9fa;
+                border-left: 4px solid #4CAF50;
+                padding: 12px 16px;
+                margin: 8px 0;
+                border-radius: 4px;
+                color: #1f2937;
+                font-size: 0.95rem;
+            ">
+                <strong style="color: #1e3a8a;">{icon} Step {i+1}: {label}{extra}</strong> 
+                <span style="color: #6b7280;">({s.duration}s)</span>
             </div>
             """, unsafe_allow_html=True)
 
@@ -433,3 +443,4 @@ st.markdown("""
 </div>
 
 """, unsafe_allow_html=True)
+
