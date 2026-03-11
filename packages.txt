@@ -1,6 +1,2 @@
 build-essential
 python3-dev
-libglib2.0-0
-libgl1
-poppler-utils
-tesseract-ocr
