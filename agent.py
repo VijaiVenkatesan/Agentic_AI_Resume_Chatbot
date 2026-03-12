@@ -1,5 +1,5 @@
 """
-Agentic AI Orchestrator — Universal Resume Agent
+Agentic AI Orchestrator - JD-aware, 2026 experience
 Plan → Execute MCP Tools → Synthesize
 """
 
@@ -8,57 +8,54 @@ import time
 import requests
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass, field
-
 from mcp_tools import MCPToolRegistry, ToolResult
 
+PLANNING_PROMPT = """You are an intelligent agent. Current year is 2026.
 
-PLANNING_PROMPT = """You are an intelligent agent that helps answer questions about an uploaded resume.
-
-You have these tools:
-
+Available tools:
 {tools_description}
 
-Based on the user's question, decide which tool(s) to call.
+{jd_context}
 
-RESPOND IN EXACTLY THIS JSON FORMAT (no other text, no markdown):
+Respond ONLY in this JSON format (no markdown, no code blocks):
 {{
-    "reasoning": "Brief explanation of your plan",
+    "reasoning": "Brief plan",
     "tools": [
-        {{
-            "tool_name": "tool_name_here",
-            "parameters": {{
-                "param1": "value1"
-            }}
-        }}
+        {{"tool_name": "name", "parameters": {{"param": "value"}}}}
     ]
 }}
 
 RULES:
 1. General resume questions → "resume_search"
-2. Skill matching → "skill_analyzer" + "resume_search"
-3. Experience questions → "experience_calculator"
+2. Skill matching/comparison → "skill_analyzer" + "resume_search"
+3. Experience/timeline → "experience_calculator"
 4. Cover letter requests → "cover_letter_generator" + "resume_search"
-5. Summary/bio requests → "profile_summary"
-6. Job fit analysis → "job_matcher" + "skill_analyzer"
-7. Complex questions → use MULTIPLE tools
-8. Always include "resume_search" for context
-9. Greetings → "profile_summary" with context="elevator_pitch"
+5. Summary/bio/profile → "profile_summary"
+6. JD comparison/job fit → "jd_matcher" (ONLY if JD is uploaded)
+7. Contact info → "profile_summary" + "resume_search"
+8. Complex questions → MULTIPLE tools
+9. Always include "resume_search" for extra context
+10. Greetings → "profile_summary" with context="elevator_pitch"
 
-USER QUESTION: {question}
-"""
+USER QUESTION: {question}"""
 
-SYNTHESIS_PROMPT = """You are an AI resume assistant. A user uploaded their resume and asked a question.
+SYNTHESIS_PROMPT = """You are a professional AI resume assistant. Current year is 2026.
 
-You used these tools to gather information:
-
+Tool results:
 {tool_results}
 
 QUESTION: {question}
 
-Provide a comprehensive, well-formatted answer using markdown.
-Use **bold** for highlights, bullet points for lists.
-Be professional, specific, use numbers when available.
-Only use information from the tool results."""
+Create a comprehensive answer:
+- Use **bold** for key highlights, numbers, percentages
+- Use bullet points for lists
+- Use ### headers for sections in long answers
+- Include ALL relevant details from tool results
+- For experience: clearly state "as of 2026"
+- For contact info: list ALL available details (name, email, phone, address, LinkedIn, GitHub)
+- For JD matching: present scores clearly with recommendation
+- Be specific - use actual numbers, dates, company names
+- Only use info from tool results"""
 
 
 @dataclass
@@ -82,15 +79,12 @@ class AgentResponse:
 
 
 class ResumeAgent:
-    def __init__(
-        self,
-        tool_registry: MCPToolRegistry,
-        groq_api_key: str,
-        model_id: str = "llama-3.1-8b-instant"
-    ):
+    def __init__(self, tool_registry: MCPToolRegistry, groq_api_key: str,
+                 model_id: str = "llama-3.1-8b-instant", jd_text: str = ""):
         self.registry = tool_registry
         self.api_key = groq_api_key
         self.model_id = model_id
+        self.jd_text = jd_text
 
     def _call_groq(self, system: str, user: str, temp: float = 0.3) -> str:
         headers = {
@@ -104,7 +98,7 @@ class ResumeAgent:
                 {"role": "user", "content": user}
             ],
             "temperature": temp,
-            "max_tokens": 2048,
+            "max_tokens": 3000,
         }
 
         models = [self.model_id, "llama-3.1-8b-instant", "llama-3.3-70b-versatile"]
@@ -124,24 +118,32 @@ class ResumeAgent:
                     continue
             except Exception:
                 continue
-
-        return "Error: Could not get response."
+        return "Error: Could not get response from any model."
 
     def _plan(self, question: str) -> Tuple[List[Dict], AgentStep]:
         start = time.time()
+        jd_ctx = ""
+        if self.jd_text:
+            jd_ctx = (
+                "A Job Description has been uploaded. If user asks about job fit, "
+                "matching, or comparison, use 'jd_matcher'. "
+                f"JD preview: {self.jd_text[:200]}..."
+            )
+
         prompt = PLANNING_PROMPT.format(
             tools_description=self.registry.get_tools_description(),
+            jd_context=jd_ctx,
             question=question
         )
+
         response = self._call_groq(
-            "You are a planning agent. Return ONLY valid JSON.",
-            prompt, 0.1
+            "Return ONLY valid JSON. No markdown. No code blocks.", prompt, 0.1
         )
 
         try:
             cleaned = response.strip()
             if cleaned.startswith("```"):
-                cleaned = cleaned.split("\n", 1)[1]
+                cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
             if cleaned.endswith("```"):
                 cleaned = cleaned.rsplit("```", 1)[0]
             plan = json.loads(cleaned.strip())
@@ -150,6 +152,11 @@ class ResumeAgent:
         except json.JSONDecodeError:
             tools = [{"tool_name": "resume_search", "parameters": {"query": question}}]
             reasoning = "Defaulting to resume search"
+
+        # Auto-inject JD text into jd_matcher calls
+        for t in tools:
+            if t["tool_name"] == "jd_matcher" and self.jd_text:
+                t["parameters"]["jd_text"] = self.jd_text
 
         step = AgentStep(
             "planning",
@@ -176,22 +183,22 @@ class ResumeAgent:
 
             result = self.registry.execute_tool(name, **params)
             results.append(result)
+
             steps.append(AgentStep(
                 "tool_call", tool_name=name,
                 input_data=params,
                 output_data=(
-                    {"preview": str(result.data)[:200]}
+                    {"preview": str(result.data)[:300]}
                     if result.success else {"error": result.error}
                 ),
                 duration=round(time.time() - start, 3),
-                success=result.success, error=result.error
+                success=result.success,
+                error=result.error
             ))
         return results, steps
 
-    def _synthesize(
-        self, question: str, results: List[ToolResult],
-        history: List[Dict] = None
-    ) -> Tuple[str, AgentStep]:
+    def _synthesize(self, question: str, results: List[ToolResult],
+                    history: List[Dict] = None) -> Tuple[str, AgentStep]:
         start = time.time()
 
         results_text = ""
@@ -199,7 +206,7 @@ class ResumeAgent:
             results_text += f"\n### Tool: {r.tool_name}\n"
             results_text += f"Status: {'OK' if r.success else 'FAIL'}\n"
             if r.success:
-                results_text += f"Data:\n{json.dumps(r.data, indent=2, default=str)[:3000]}\n"
+                results_text += f"Data:\n{json.dumps(r.data, indent=2, default=str)[:4000]}\n"
             else:
                 results_text += f"Error: {r.error}\n"
 
@@ -214,11 +221,7 @@ class ResumeAgent:
                 history_ctx += f"\n{role}: {msg['content'][:200]}"
 
         answer = self._call_groq(prompt, question + history_ctx, 0.7)
-
-        step = AgentStep(
-            "synthesis",
-            duration=round(time.time() - start, 3)
-        )
+        step = AgentStep("synthesis", duration=round(time.time() - start, 3))
         return answer, step
 
     def run(self, question: str, history: List[Dict] = None) -> AgentResponse:
@@ -236,7 +239,8 @@ class ResumeAgent:
         all_steps.append(synth_step)
 
         return AgentResponse(
-            answer=answer, steps=all_steps,
+            answer=answer,
+            steps=all_steps,
             tools_used=tools_used,
             total_time=round(time.time() - total_start, 2),
             model_used=self.model_id
