@@ -1,5 +1,6 @@
 """
-Agentic AI Orchestrator - JD-aware, 2026 experience
+Agentic AI Orchestrator - V2
+JD-aware, Education-aware, 2026 experience
 Plan → Execute MCP Tools → Synthesize
 """
 
@@ -28,14 +29,18 @@ Respond ONLY in this JSON format (no markdown, no code blocks):
 RULES:
 1. General resume questions → "resume_search"
 2. Skill matching/comparison → "skill_analyzer" + "resume_search"
-3. Experience/timeline → "experience_calculator"
+3. Experience/timeline/work history → "experience_calculator"
 4. Cover letter requests → "cover_letter_generator" + "resume_search"
-5. Summary/bio/profile → "profile_summary"
+5. Summary/bio/profile/contact → "profile_summary"
 6. JD comparison/job fit → "jd_matcher" (ONLY if JD is uploaded)
-7. Contact info → "profile_summary" + "resume_search"
-8. Complex questions → MULTIPLE tools
-9. Always include "resume_search" for extra context
-10. Greetings → "profile_summary" with context="elevator_pitch"
+7. Education/degree/university/college/GPA/qualifications → "education_extractor" + "resume_search"
+8. Certifications → "education_extractor"
+9. Contact info → "profile_summary" + "resume_search"
+10. Complex questions → MULTIPLE tools
+11. Always include "resume_search" for extra context when needed
+12. Greetings → "profile_summary" with context="elevator_pitch"
+
+IMPORTANT: For education-related questions, ALWAYS use "education_extractor" tool!
 
 USER QUESTION: {question}"""
 
@@ -52,10 +57,12 @@ Create a comprehensive answer:
 - Use ### headers for sections in long answers
 - Include ALL relevant details from tool results
 - For experience: clearly state "as of 2026"
+- For education: include degree, institution, year, GPA/grades if available
 - For contact info: list ALL available details (name, email, phone, address, LinkedIn, GitHub)
 - For JD matching: present scores clearly with recommendation
-- Be specific - use actual numbers, dates, company names
-- Only use info from tool results"""
+- Be specific - use actual numbers, dates, company names, institution names
+- Only use info from tool results
+- If education details are found, present them clearly with degree, field, institution, year"""
 
 
 @dataclass
@@ -98,7 +105,7 @@ class ResumeAgent:
                 {"role": "user", "content": user}
             ],
             "temperature": temp,
-            "max_tokens": 3000,
+            "max_tokens": 3500,
         }
 
         models = [self.model_id, "llama-3.1-8b-instant", "llama-3.3-70b-versatile"]
@@ -150,8 +157,9 @@ class ResumeAgent:
             tools = plan.get("tools", [])
             reasoning = plan.get("reasoning", "")
         except json.JSONDecodeError:
-            tools = [{"tool_name": "resume_search", "parameters": {"query": question}}]
-            reasoning = "Defaulting to resume search"
+            # Default fallback based on question keywords
+            tools = self._get_fallback_tools(question)
+            reasoning = "Fallback planning based on question keywords"
 
         # Auto-inject JD text into jd_matcher calls
         for t in tools:
@@ -168,6 +176,38 @@ class ResumeAgent:
             duration=round(time.time() - start, 3)
         )
         return tools, step
+
+    def _get_fallback_tools(self, question: str) -> List[Dict]:
+        """Get fallback tools based on question keywords"""
+        q_lower = question.lower()
+        tools = []
+        
+        # Education keywords
+        edu_keywords = ["education", "degree", "university", "college", "school", 
+                       "gpa", "cgpa", "qualification", "bachelor", "master", "phd",
+                       "b.tech", "m.tech", "graduated", "studied", "academic"]
+        if any(kw in q_lower for kw in edu_keywords):
+            tools.append({"tool_name": "education_extractor", "parameters": {"include_certifications": True}})
+        
+        # Experience keywords
+        exp_keywords = ["experience", "work", "job", "career", "years", "timeline", "history"]
+        if any(kw in q_lower for kw in exp_keywords):
+            tools.append({"tool_name": "experience_calculator", "parameters": {"category": "all"}})
+        
+        # Skills keywords
+        skill_keywords = ["skill", "technology", "tech stack", "proficient", "expertise"]
+        if any(kw in q_lower for kw in skill_keywords):
+            tools.append({"tool_name": "skill_analyzer", "parameters": {"required_skills": ""}})
+        
+        # Contact keywords
+        contact_keywords = ["contact", "email", "phone", "linkedin", "github", "reach"]
+        if any(kw in q_lower for kw in contact_keywords):
+            tools.append({"tool_name": "profile_summary", "parameters": {"context": "detailed"}})
+        
+        # Always add resume search
+        tools.append({"tool_name": "resume_search", "parameters": {"query": question}})
+        
+        return tools if tools else [{"tool_name": "resume_search", "parameters": {"query": question}}]
 
     def _execute_tools(self, tools: List[Dict]) -> Tuple[List[ToolResult], List[AgentStep]]:
         results, steps = [], []
@@ -188,7 +228,7 @@ class ResumeAgent:
                 "tool_call", tool_name=name,
                 input_data=params,
                 output_data=(
-                    {"preview": str(result.data)[:300]}
+                    {"preview": str(result.data)[:500]}
                     if result.success else {"error": result.error}
                 ),
                 duration=round(time.time() - start, 3),
@@ -206,7 +246,7 @@ class ResumeAgent:
             results_text += f"\n### Tool: {r.tool_name}\n"
             results_text += f"Status: {'OK' if r.success else 'FAIL'}\n"
             if r.success:
-                results_text += f"Data:\n{json.dumps(r.data, indent=2, default=str)[:4000]}\n"
+                results_text += f"Data:\n{json.dumps(r.data, indent=2, default=str)[:5000]}\n"
             else:
                 results_text += f"Error: {r.error}\n"
 
