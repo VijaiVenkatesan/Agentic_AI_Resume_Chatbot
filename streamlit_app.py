@@ -1,6 +1,6 @@
 """
-Universal Agentic AI Resume Chatbot - V4
-Features: Full-screen preview modal, open in new tab, agent trace, 100MB upload, better UI
+Universal Agentic AI Resume Chatbot - V5
+Fixes: Preview blocking, new tab, DOCX full text, proper reset, all formats support
 """
 
 import streamlit as st
@@ -156,18 +156,6 @@ st.markdown("""
     }
     @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.35;} }
 
-    /* ── File Preview Box ── */
-    .preview-box {
-        background: #1e293b; border: 1px solid #475569;
-        border-radius: 10px; padding: 12px; margin: 8px 0;
-        max-height: 450px; overflow-y: auto;
-    }
-    .preview-box p, .preview-box span { color: #cbd5e1 !important; font-size: 0.85rem; }
-    .preview-label {
-        color: #94a3b8 !important; font-size: 0.75rem;
-        margin-top: 6px; display: block;
-    }
-
     /* ── Welcome Card ── */
     .welcome-box {
         background: linear-gradient(135deg, #1e293b, #334155);
@@ -237,77 +225,147 @@ st.markdown("""
     #MainMenu {visibility: hidden;} footer {visibility: hidden;}
     header[data-testid="stHeader"] { background: #0f172a !important; }
 
-    /* ── FULL-SCREEN PREVIEW MODAL ── */
-    .preview-modal-header {
+    /* ── FULL-SCREEN PREVIEW ── */
+    .preview-header {
         background: linear-gradient(135deg, #4338ca, #7c3aed);
         padding: 16px 24px;
         border-radius: 12px 12px 0 0;
         margin-top: 10px;
     }
     
-    .preview-modal-title {
+    .preview-title {
         color: #fff !important;
         font-size: 1.2rem;
         font-weight: 600;
         margin: 0;
     }
     
-    .preview-modal-body {
+    .preview-body {
         background: #0f172a;
         border: 1px solid #475569;
         border-top: none;
         border-radius: 0 0 12px 12px;
         padding: 20px;
         min-height: 500px;
-    }
-    
-    .preview-content {
-        background: #1e293b;
-        color: #e2e8f0 !important;
-        padding: 20px;
-        border-radius: 8px;
-        font-size: 0.9rem;
-        line-height: 1.7;
-        white-space: pre-wrap;
-        word-wrap: break-word;
-        max-height: 600px;
+        max-height: 75vh;
         overflow: auto;
     }
     
-    .newtab-link {
+    .preview-text-content {
+        background: #1e293b;
+        color: #e2e8f0 !important;
+        padding: 24px;
+        border-radius: 8px;
+        font-size: 0.92rem;
+        line-height: 1.8;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        max-height: 65vh;
+        overflow: auto;
+    }
+    
+    .preview-image-container {
+        background: #1e293b;
+        padding: 20px;
+        border-radius: 8px;
+        text-align: center;
+    }
+    
+    .preview-image-container img {
+        max-width: 100%;
+        max-height: 65vh;
+        border-radius: 8px;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+    }
+    
+    .download-btn {
         display: inline-block;
         background: linear-gradient(135deg, #059669, #10b981);
         color: #fff !important;
-        padding: 8px 16px;
+        padding: 10px 20px;
         border-radius: 8px;
-        font-size: 0.85rem;
+        font-size: 0.9rem;
         text-decoration: none;
-        font-weight: 500;
+        font-weight: 600;
+        margin: 5px;
         transition: all 0.2s;
     }
     
-    .newtab-link:hover {
+    .download-btn:hover {
         box-shadow: 0 4px 15px rgba(16, 185, 129, 0.4);
-        transform: translateY(-1px);
+        transform: translateY(-2px);
     }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ── SESSION STATE ──
-defaults = {
-    "messages": [], "selected_model": DEFAULT_MODEL, "show_agent_trace": True,
-    "resume_text": "", "parsed_resume": None, "resume_loaded": False,
-    "file_info": None, "tool_registry": None,
-    "jd_text": "", "jd_loaded": False, "jd_file_info": None,
-    "file_key": None, "jd_file_key": None,
-    "show_preview_modal": False,
-}
-for k, v in defaults.items():
+# ── SESSION STATE DEFAULTS ──
+def get_default_state():
+    return {
+        "messages": [],
+        "selected_model": DEFAULT_MODEL,
+        "show_agent_trace": True,
+        "resume_text": "",
+        "parsed_resume": None,
+        "resume_loaded": False,
+        "file_info": None,
+        "tool_registry": None,
+        "jd_text": "",
+        "jd_loaded": False,
+        "jd_file_info": None,
+        "file_key": None,
+        "jd_file_key": None,
+        "show_preview_modal": False,
+        "raw_file_bytes": None,
+        "raw_file_name": None,
+        "raw_file_type": None,
+    }
+
+# Initialize session state
+for k, v in get_default_state().items():
     if k not in st.session_state:
         st.session_state[k] = v
 
 GROQ_API_KEY = get_groq_key()
+
+
+# ═══════════════════════════════════════════
+#          HELPER FUNCTIONS
+# ═══════════════════════════════════════════
+
+def reset_all_state():
+    """Completely reset all session state"""
+    default_state = get_default_state()
+    for key in list(st.session_state.keys()):
+        if key in default_state:
+            st.session_state[key] = default_state[key]
+        elif key not in ["resume_up", "jd_up", "jd_paste"]:
+            # Don't delete widget keys
+            try:
+                del st.session_state[key]
+            except:
+                pass
+
+
+def get_file_download_link(file_bytes, file_name, file_type, link_text="📥 Download File"):
+    """Generate a download link for a file"""
+    b64 = base64.b64encode(file_bytes).decode()
+    
+    # Determine MIME type
+    mime_types = {
+        ".pdf": "application/pdf",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".doc": "application/msword",
+        ".txt": "text/plain",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+    }
+    mime = mime_types.get(file_type.lower(), "application/octet-stream")
+    
+    return f'<a href="data:{mime};base64,{b64}" download="{file_name}" class="download-btn">{link_text}</a>'
 
 
 # ═══════════════════════════════════════════
@@ -324,12 +382,22 @@ with st.sidebar:
     resume_file = st.file_uploader(
         "Upload Resume",
         type=["pdf", "docx", "doc", "txt", "jpg", "jpeg", "png", "webp"],
-        label_visibility="collapsed", key="resume_up"
+        label_visibility="collapsed",
+        key="resume_uploader"
     )
 
     if resume_file:
         fk = f"{resume_file.name}_{resume_file.size}"
         if not st.session_state.resume_loaded or st.session_state.file_key != fk:
+            # Store raw file bytes for preview
+            resume_file.seek(0)
+            raw_bytes = resume_file.read()
+            resume_file.seek(0)
+            
+            st.session_state.raw_file_bytes = raw_bytes
+            st.session_state.raw_file_name = resume_file.name
+            st.session_state.raw_file_type = os.path.splitext(resume_file.name)[1].lower()
+            
             with st.spinner("📄 Processing document..."):
                 result = process_uploaded_file(resume_file, GROQ_API_KEY)
 
@@ -358,41 +426,21 @@ with st.sidebar:
     if st.session_state.resume_loaded and st.session_state.file_info:
         fi = st.session_state.file_info
         st.success(f"✅ {fi['file_name']} ({fi['file_size_kb']} KB)")
-
-    # ── File Preview Buttons ──
-    if st.session_state.resume_loaded and st.session_state.file_info:
-        fi = st.session_state.file_info
-        preview = fi.get("preview", {})
-        ptype = preview.get("type", "")
         
-        col_prev1, col_prev2 = st.columns([1, 1])
-        with col_prev1:
-            if st.button("👁️ View Resume", key="open_preview", use_container_width=True):
-                st.session_state.show_preview_modal = True
-                st.rerun()
-        with col_prev2:
-            # Open in new tab button (for PDFs and images)
-            if ptype in [".pdf", ".jpg", ".jpeg", ".png", ".webp"] and preview.get("preview_data"):
-                mime = preview.get("mime_type", "application/pdf")
-                b64_data = preview["preview_data"]
-                st.markdown(
-                    f'''<a href="data:{mime};base64,{b64_data}" 
-                        target="_blank" 
-                        class="newtab-link"
-                        style="
-                            display: inline-block;
-                            width: 100%;
-                            text-align: center;
-                            background: linear-gradient(135deg, #059669, #10b981);
-                            color: #fff;
-                            padding: 8px 12px;
-                            border-radius: 8px;
-                            font-size: 0.82rem;
-                            text-decoration: none;
-                            font-weight: 500;
-                        ">🔗 New Tab</a>''',
-                    unsafe_allow_html=True
-                )
+        # View Resume Button
+        if st.button("👁️ View Full Resume", key="open_preview", use_container_width=True):
+            st.session_state.show_preview_modal = True
+            st.rerun()
+        
+        # Download button
+        if st.session_state.raw_file_bytes:
+            st.download_button(
+                label="📥 Download Resume",
+                data=st.session_state.raw_file_bytes,
+                file_name=st.session_state.raw_file_name,
+                mime="application/octet-stream",
+                use_container_width=True
+            )
 
     # ── Parsed Profile ──
     if st.session_state.parsed_resume:
@@ -419,7 +467,7 @@ with st.sidebar:
         if loc:
             html += f'<p>📍 {loc[:80]}</p>'
         if exp:
-            html += f'<p>📅 ~{exp} years exp (as of 2026)</p>'
+            html += f'<p>📅 ~{exp} years exp</p>'
         if email:
             html += f'<p>📧 {email}</p>'
         if phone:
@@ -439,12 +487,12 @@ with st.sidebar:
     # ── JD Upload (Optional) ──
     st.markdown("""<div class="jd-box">
         <h4>📋 Job Description (Optional)</h4>
-        <p>Upload or paste JD to compare · Up to 100MB</p>
+        <p>Upload or paste JD to compare</p>
     </div>""", unsafe_allow_html=True)
 
     jd_file = st.file_uploader(
         "Upload JD", type=["pdf", "docx", "doc", "txt"],
-        label_visibility="collapsed", key="jd_up"
+        label_visibility="collapsed", key="jd_uploader"
     )
 
     if jd_file:
@@ -466,12 +514,12 @@ with st.sidebar:
     if st.session_state.jd_loaded:
         st.success("✅ Job Description loaded")
         with st.expander("👁️ View Job Description"):
-            st.text_area("JD", st.session_state.jd_text[:5000], height=200,
+            st.text_area("JD", st.session_state.jd_text, height=200,
                         disabled=True, label_visibility="collapsed")
 
     if not st.session_state.jd_loaded:
         jd_paste = st.text_area(
-            "Or paste JD text:", height=120, key="jd_paste",
+            "Or paste JD text:", height=120, key="jd_paste_area",
             placeholder="Paste job description here (optional)...",
             max_chars=50000,
         )
@@ -488,7 +536,8 @@ with st.sidebar:
     st.markdown("### 🧠 AI Model")
     sel = st.selectbox(
         "Model", list(GROQ_MODELS.keys()),
-        index=list(GROQ_MODELS.keys()).index(st.session_state.selected_model)
+        index=list(GROQ_MODELS.keys()).index(st.session_state.selected_model),
+        key="model_selector"
     )
     st.session_state.selected_model = sel
     mi = GROQ_MODELS[sel]
@@ -508,7 +557,8 @@ with st.sidebar:
     # ── Settings ──
     st.markdown("### ⚙️ Settings")
     st.session_state.show_agent_trace = st.toggle(
-        "🔍 Show Agent Trace", value=st.session_state.show_agent_trace
+        "🔍 Show Agent Trace", value=st.session_state.show_agent_trace,
+        key="trace_toggle"
     )
 
     st.markdown("---")
@@ -552,7 +602,7 @@ with st.sidebar:
             suggestions.insert(1, "How well does this candidate fit the JD?")
 
         for i, s in enumerate(suggestions):
-            if st.button(f"📌 {s}", key=f"s_{i}", use_container_width=True):
+            if st.button(f"📌 {s}", key=f"suggestion_{i}", use_container_width=True):
                 st.session_state.pending_question = s
                 st.rerun()
 
@@ -560,13 +610,12 @@ with st.sidebar:
 
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("🗑️ Clear Chat", use_container_width=True):
+        if st.button("🗑️ Clear Chat", use_container_width=True, key="clear_chat_btn"):
             st.session_state.messages = []
             st.rerun()
     with c2:
-        if st.button("📄 New Resume", use_container_width=True):
-            for k in defaults:
-                st.session_state[k] = defaults[k]
+        if st.button("📄 New Resume", use_container_width=True, key="new_resume_btn"):
+            reset_all_state()
             st.rerun()
 
 
@@ -574,30 +623,21 @@ with st.sidebar:
 #        FULL-SCREEN PREVIEW MODAL
 # ═══════════════════════════════════════════
 
-if st.session_state.show_preview_modal and st.session_state.file_info:
+if st.session_state.show_preview_modal and st.session_state.resume_loaded:
     fi = st.session_state.file_info
-    preview = fi.get("preview", {})
-    ptype = preview.get("type", "")
-    
-    # Modal container
-    st.markdown("""
-        <div style="
-            background: rgba(0, 0, 0, 0.3);
-            padding: 10px;
-            border-radius: 16px;
-            margin-bottom: 20px;
-        ">
-    """, unsafe_allow_html=True)
+    file_type = st.session_state.raw_file_type
+    file_name = st.session_state.raw_file_name
+    file_bytes = st.session_state.raw_file_bytes
     
     # Header with close button
     header_col1, header_col2 = st.columns([8, 2])
     with header_col1:
         st.markdown(f"""
-            <div class="preview-modal-header">
-                <h3 class="preview-modal-title">
-                    📄 {fi['file_name']}
+            <div class="preview-header">
+                <h3 class="preview-title">
+                    📄 {file_name}
                     <span style="color: #e0e7ff; font-size: 0.85rem; font-weight: 400; margin-left: 10px;">
-                        {fi['file_size_kb']} KB · {fi['file_type'].upper()}
+                        {fi['file_size_kb']} KB · {file_type.upper().replace('.', '')}
                     </span>
                 </h3>
             </div>
@@ -605,92 +645,91 @@ if st.session_state.show_preview_modal and st.session_state.file_info:
     
     with header_col2:
         st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
-        if st.button("❌ Close Preview", key="close_preview", use_container_width=True):
+        if st.button("❌ Close Preview", key="close_preview_btn", use_container_width=True):
             st.session_state.show_preview_modal = False
             st.rerun()
     
-    # Preview content container
-    st.markdown("""
-        <div class="preview-modal-body">
-    """, unsafe_allow_html=True)
+    # Preview content
+    st.markdown('<div class="preview-body">', unsafe_allow_html=True)
     
-    # Render preview based on file type
-    if ptype in [".jpg", ".jpeg", ".png", ".webp"] and preview.get("preview_data"):
-        # Image preview
-        mime = preview.get("mime_type", "image/png")
-        st.image(
-            f"data:{mime};base64,{preview['preview_data']}",
-            caption=fi["file_name"],
-            use_container_width=True
+    # Render based on file type
+    if file_type in [".jpg", ".jpeg", ".png", ".webp"]:
+        # IMAGE PREVIEW
+        st.markdown('<div class="preview-image-container">', unsafe_allow_html=True)
+        b64_img = base64.b64encode(file_bytes).decode()
+        mime_type = f"image/{file_type.replace('.', '')}"
+        if file_type == ".jpg":
+            mime_type = "image/jpeg"
+        st.markdown(
+            f'<img src="data:{mime_type};base64,{b64_img}" alt="{file_name}">',
+            unsafe_allow_html=True
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+    elif file_type == ".pdf":
+        # PDF PREVIEW - Show extracted text (full content)
+        st.markdown("**📑 PDF Content (Full Text)**")
+        st.markdown(
+            f'<div class="preview-text-content">{st.session_state.resume_text}</div>',
+            unsafe_allow_html=True
+        )
+        
+    elif file_type in [".docx", ".doc"]:
+        # DOCX PREVIEW - Show full extracted text
+        st.markdown("**📘 Document Content (Full Text)**")
+        st.markdown(
+            f'<div class="preview-text-content">{st.session_state.resume_text}</div>',
+            unsafe_allow_html=True
+        )
+        
+    elif file_type in [".txt", ".text", ".md"]:
+        # TEXT PREVIEW - Show full content
+        st.markdown("**📝 Text Content (Full)**")
+        st.markdown(
+            f'<div class="preview-text-content">{st.session_state.resume_text}</div>',
+            unsafe_allow_html=True
+        )
+        
+    else:
+        # FALLBACK - Show extracted text
+        st.markdown("**📄 Extracted Content**")
+        st.markdown(
+            f'<div class="preview-text-content">{st.session_state.resume_text}</div>',
+            unsafe_allow_html=True
         )
     
-    elif ptype == ".pdf" and preview.get("preview_data"):
-        # PDF preview using iframe
-        b64_pdf = preview["preview_data"]
-        pdf_display = f'''
-            <iframe 
-                src="data:application/pdf;base64,{b64_pdf}#toolbar=1&navpanes=1&scrollbar=1" 
-                width="100%" 
-                height="650px" 
-                style="border: none; border-radius: 8px; background: #fff;"
-            ></iframe>
-        '''
-        st.markdown(pdf_display, unsafe_allow_html=True)
-        
-        # Page count info
-        if preview.get("page_count"):
-            st.caption(f"📑 {preview['page_count']} pages")
-    
-    elif ptype in [".docx", ".doc"] and preview.get("preview_data"):
-        # DOCX preview as formatted text
-        st.markdown(f"""
-            <pre class="preview-content">{preview['preview_data']}</pre>
-        """, unsafe_allow_html=True)
-    
-    elif ptype in [".txt", ".md", ".text"] and preview.get("preview_data"):
-        # Text preview
-        st.markdown(f"""
-            <pre class="preview-content">{preview['preview_data']}</pre>
-        """, unsafe_allow_html=True)
-    
-    else:
-        # Fallback - show extracted text
-        st.markdown(f"""
-            <pre class="preview-content">{st.session_state.resume_text}</pre>
-        """, unsafe_allow_html=True)
-    
-    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
     
     # Footer with actions
-    footer_col1, footer_col2, footer_col3 = st.columns([4, 4, 4])
+    st.markdown("---")
+    footer_col1, footer_col2, footer_col3 = st.columns([3, 3, 3])
     
     with footer_col1:
-        st.caption(f"📁 **File:** {fi['file_name']}")
+        st.caption(f"📁 **File:** {file_name}")
     
     with footer_col2:
-        st.caption(f"📊 **Size:** {fi['file_size_kb']} KB")
+        st.caption(f"📊 **Size:** {fi['file_size_kb']} KB | **Type:** {file_type.upper()}")
     
     with footer_col3:
-        # New tab link for PDFs and images
-        if ptype in [".pdf", ".jpg", ".jpeg", ".png", ".webp"] and preview.get("preview_data"):
-            mime = preview.get("mime_type", "application/pdf")
-            b64_data = preview["preview_data"]
-            st.markdown(
-                f'''<a href="data:{mime};base64,{b64_data}" 
-                    target="_blank" 
-                    class="newtab-link">🔗 Open in New Tab</a>''',
-                unsafe_allow_html=True
-            )
+        # Download button
+        st.download_button(
+            label="📥 Download Original",
+            data=file_bytes,
+            file_name=file_name,
+            mime="application/octet-stream",
+            key="download_preview_btn"
+        )
     
-    st.markdown("</div>", unsafe_allow_html=True)
     st.markdown("<br>", unsafe_allow_html=True)
     
     # Back to chat button
-    if st.button("⬅️ Back to Chat", key="back_to_chat", use_container_width=True):
-        st.session_state.show_preview_modal = False
-        st.rerun()
+    col_back1, col_back2, col_back3 = st.columns([1, 2, 1])
+    with col_back2:
+        if st.button("⬅️ Back to Chat", key="back_to_chat_btn", use_container_width=True):
+            st.session_state.show_preview_modal = False
+            st.rerun()
     
-    # Stop here to show only the preview
+    # Stop here - don't render chat
     st.stop()
 
 
@@ -741,7 +780,6 @@ def show_trace(steps, tools_used):
                 "synthesis": "trace-synth"
             }.get(s.step_type, "trace-tool")
 
-            # Build content with explicit dark colors
             title = f"{icon} Step {i+1}: {s.step_type.upper()}"
             details = ""
 
@@ -781,7 +819,7 @@ if not st.session_state.resume_loaded:
         <ul>
             <li>📄 Resume Search — RAG semantic search</li>
             <li>📊 Skill Analyzer — Match skills vs requirements</li>
-            <li>💼 Experience Calculator — Years breakdown (as of 2026)</li>
+            <li>💼 Experience Calculator — Years breakdown</li>
             <li>📝 Cover Letter Generator — Tailored cover letters</li>
             <li>👤 Profile Summary — LinkedIn / portfolio bios</li>
             <li>🎯 JD Matcher — Resume vs Job Description scoring</li>
