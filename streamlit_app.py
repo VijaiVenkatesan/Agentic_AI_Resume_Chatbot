@@ -1,6 +1,6 @@
 """
-Universal Agentic AI Resume Chatbot - V3
-Fixes: Agent trace visibility, PDF preview, auto-refresh, 100MB upload, better UI
+Universal Agentic AI Resume Chatbot - V4
+Features: Full-screen preview modal, open in new tab, agent trace, 100MB upload, better UI
 """
 
 import streamlit as st
@@ -236,6 +236,60 @@ st.markdown("""
     /* ── Hide Streamlit Chrome ── */
     #MainMenu {visibility: hidden;} footer {visibility: hidden;}
     header[data-testid="stHeader"] { background: #0f172a !important; }
+
+    /* ── FULL-SCREEN PREVIEW MODAL ── */
+    .preview-modal-header {
+        background: linear-gradient(135deg, #4338ca, #7c3aed);
+        padding: 16px 24px;
+        border-radius: 12px 12px 0 0;
+        margin-top: 10px;
+    }
+    
+    .preview-modal-title {
+        color: #fff !important;
+        font-size: 1.2rem;
+        font-weight: 600;
+        margin: 0;
+    }
+    
+    .preview-modal-body {
+        background: #0f172a;
+        border: 1px solid #475569;
+        border-top: none;
+        border-radius: 0 0 12px 12px;
+        padding: 20px;
+        min-height: 500px;
+    }
+    
+    .preview-content {
+        background: #1e293b;
+        color: #e2e8f0 !important;
+        padding: 20px;
+        border-radius: 8px;
+        font-size: 0.9rem;
+        line-height: 1.7;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        max-height: 600px;
+        overflow: auto;
+    }
+    
+    .newtab-link {
+        display: inline-block;
+        background: linear-gradient(135deg, #059669, #10b981);
+        color: #fff !important;
+        padding: 8px 16px;
+        border-radius: 8px;
+        font-size: 0.85rem;
+        text-decoration: none;
+        font-weight: 500;
+        transition: all 0.2s;
+    }
+    
+    .newtab-link:hover {
+        box-shadow: 0 4px 15px rgba(16, 185, 129, 0.4);
+        transform: translateY(-1px);
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -247,6 +301,7 @@ defaults = {
     "file_info": None, "tool_registry": None,
     "jd_text": "", "jd_loaded": False, "jd_file_info": None,
     "file_key": None, "jd_file_key": None,
+    "show_preview_modal": False,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -304,56 +359,40 @@ with st.sidebar:
         fi = st.session_state.file_info
         st.success(f"✅ {fi['file_name']} ({fi['file_size_kb']} KB)")
 
-    # ── File Preview (FIXED - uses extracted text for PDFs) ──
+    # ── File Preview Buttons ──
     if st.session_state.resume_loaded and st.session_state.file_info:
         fi = st.session_state.file_info
         preview = fi.get("preview", {})
-
-        with st.expander("👁️ View Uploaded Resume", expanded=False):
-            ptype = preview.get("type", "")
-
-            if ptype in [".jpg", ".jpeg", ".png", ".webp"] and preview.get("preview_data"):
-                st.image(
-                    f"data:{preview.get('mime_type', 'image/png')};base64,{preview['preview_data']}",
-                    caption=fi["file_name"], use_container_width=True
+        ptype = preview.get("type", "")
+        
+        col_prev1, col_prev2 = st.columns([1, 1])
+        with col_prev1:
+            if st.button("👁️ View Resume", key="open_preview", use_container_width=True):
+                st.session_state.show_preview_modal = True
+                st.rerun()
+        with col_prev2:
+            # Open in new tab button (for PDFs and images)
+            if ptype in [".pdf", ".jpg", ".jpeg", ".png", ".webp"] and preview.get("preview_data"):
+                mime = preview.get("mime_type", "application/pdf")
+                b64_data = preview["preview_data"]
+                st.markdown(
+                    f'''<a href="data:{mime};base64,{b64_data}" 
+                        target="_blank" 
+                        class="newtab-link"
+                        style="
+                            display: inline-block;
+                            width: 100%;
+                            text-align: center;
+                            background: linear-gradient(135deg, #059669, #10b981);
+                            color: #fff;
+                            padding: 8px 12px;
+                            border-radius: 8px;
+                            font-size: 0.82rem;
+                            text-decoration: none;
+                            font-weight: 500;
+                        ">🔗 New Tab</a>''',
+                    unsafe_allow_html=True
                 )
-            elif ptype == ".pdf":
-                # Show extracted text instead of broken iframe
-                st.markdown(f"**📄 {fi['file_name']}**")
-                if preview.get("page_count"):
-                    st.caption(f"📑 {preview['page_count']} pages · {fi['file_size_kb']} KB")
-                st.markdown("---")
-                # Show the actual extracted text
-                resume_preview = st.session_state.resume_text[:3000]
-                st.text_area(
-                    "Extracted Content",
-                    resume_preview,
-                    height=350,
-                    disabled=True,
-                    label_visibility="collapsed"
-                )
-                if len(st.session_state.resume_text) > 3000:
-                    st.caption("... (showing first 3000 characters)")
-            elif ptype in [".txt", ".md", ".text"] and preview.get("preview_data"):
-                st.code(preview["preview_data"][:2000], language=None)
-            elif ptype in [".docx", ".doc"] and preview.get("preview_data"):
-                st.text_area(
-                    "Content", preview["preview_data"][:2000],
-                    height=300, disabled=True, label_visibility="collapsed"
-                )
-            else:
-                # Fallback: show extracted text
-                st.text_area(
-                    "Content", st.session_state.resume_text[:2000],
-                    height=300, disabled=True, label_visibility="collapsed"
-                )
-
-            st.markdown(
-                f'<span class="preview-label">'
-                f'📁 {fi["file_name"]} · {fi["file_size_kb"]} KB · {fi["file_type"].upper()}'
-                f'</span>',
-                unsafe_allow_html=True
-            )
 
     # ── Parsed Profile ──
     if st.session_state.parsed_resume:
@@ -529,6 +568,130 @@ with st.sidebar:
             for k in defaults:
                 st.session_state[k] = defaults[k]
             st.rerun()
+
+
+# ═══════════════════════════════════════════
+#        FULL-SCREEN PREVIEW MODAL
+# ═══════════════════════════════════════════
+
+if st.session_state.show_preview_modal and st.session_state.file_info:
+    fi = st.session_state.file_info
+    preview = fi.get("preview", {})
+    ptype = preview.get("type", "")
+    
+    # Modal container
+    st.markdown("""
+        <div style="
+            background: rgba(0, 0, 0, 0.3);
+            padding: 10px;
+            border-radius: 16px;
+            margin-bottom: 20px;
+        ">
+    """, unsafe_allow_html=True)
+    
+    # Header with close button
+    header_col1, header_col2 = st.columns([8, 2])
+    with header_col1:
+        st.markdown(f"""
+            <div class="preview-modal-header">
+                <h3 class="preview-modal-title">
+                    📄 {fi['file_name']}
+                    <span style="color: #e0e7ff; font-size: 0.85rem; font-weight: 400; margin-left: 10px;">
+                        {fi['file_size_kb']} KB · {fi['file_type'].upper()}
+                    </span>
+                </h3>
+            </div>
+        """, unsafe_allow_html=True)
+    
+    with header_col2:
+        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+        if st.button("❌ Close Preview", key="close_preview", use_container_width=True):
+            st.session_state.show_preview_modal = False
+            st.rerun()
+    
+    # Preview content container
+    st.markdown("""
+        <div class="preview-modal-body">
+    """, unsafe_allow_html=True)
+    
+    # Render preview based on file type
+    if ptype in [".jpg", ".jpeg", ".png", ".webp"] and preview.get("preview_data"):
+        # Image preview
+        mime = preview.get("mime_type", "image/png")
+        st.image(
+            f"data:{mime};base64,{preview['preview_data']}",
+            caption=fi["file_name"],
+            use_container_width=True
+        )
+    
+    elif ptype == ".pdf" and preview.get("preview_data"):
+        # PDF preview using iframe
+        b64_pdf = preview["preview_data"]
+        pdf_display = f'''
+            <iframe 
+                src="data:application/pdf;base64,{b64_pdf}#toolbar=1&navpanes=1&scrollbar=1" 
+                width="100%" 
+                height="650px" 
+                style="border: none; border-radius: 8px; background: #fff;"
+            ></iframe>
+        '''
+        st.markdown(pdf_display, unsafe_allow_html=True)
+        
+        # Page count info
+        if preview.get("page_count"):
+            st.caption(f"📑 {preview['page_count']} pages")
+    
+    elif ptype in [".docx", ".doc"] and preview.get("preview_data"):
+        # DOCX preview as formatted text
+        st.markdown(f"""
+            <pre class="preview-content">{preview['preview_data']}</pre>
+        """, unsafe_allow_html=True)
+    
+    elif ptype in [".txt", ".md", ".text"] and preview.get("preview_data"):
+        # Text preview
+        st.markdown(f"""
+            <pre class="preview-content">{preview['preview_data']}</pre>
+        """, unsafe_allow_html=True)
+    
+    else:
+        # Fallback - show extracted text
+        st.markdown(f"""
+            <pre class="preview-content">{st.session_state.resume_text}</pre>
+        """, unsafe_allow_html=True)
+    
+    st.markdown("</div>", unsafe_allow_html=True)
+    
+    # Footer with actions
+    footer_col1, footer_col2, footer_col3 = st.columns([4, 4, 4])
+    
+    with footer_col1:
+        st.caption(f"📁 **File:** {fi['file_name']}")
+    
+    with footer_col2:
+        st.caption(f"📊 **Size:** {fi['file_size_kb']} KB")
+    
+    with footer_col3:
+        # New tab link for PDFs and images
+        if ptype in [".pdf", ".jpg", ".jpeg", ".png", ".webp"] and preview.get("preview_data"):
+            mime = preview.get("mime_type", "application/pdf")
+            b64_data = preview["preview_data"]
+            st.markdown(
+                f'''<a href="data:{mime};base64,{b64_data}" 
+                    target="_blank" 
+                    class="newtab-link">🔗 Open in New Tab</a>''',
+                unsafe_allow_html=True
+            )
+    
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    # Back to chat button
+    if st.button("⬅️ Back to Chat", key="back_to_chat", use_container_width=True):
+        st.session_state.show_preview_modal = False
+        st.rerun()
+    
+    # Stop here to show only the preview
+    st.stop()
 
 
 # ═══════════════════════════════════════════
