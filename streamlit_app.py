@@ -572,6 +572,7 @@ with st.sidebar:
         ("📝", "cover_letter", "Cover letters"),
         ("👤", "profile_summary", "Professional bios"),
         ("🎯", "jd_matcher", "JD comparison"),
+        ("🎓", "education_extractor", "Education & degrees"),  # NEW TOOL
     ]:
         st.caption(f"{icon} **{tname}**: {desc}")
 
@@ -936,3 +937,4 @@ st.markdown(
     '</p>',
     unsafe_allow_html=True
 )
+
