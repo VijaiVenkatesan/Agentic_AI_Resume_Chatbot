@@ -824,6 +824,7 @@ if not st.session_state.resume_loaded:
             <li>📝 Cover Letter Generator — Tailored cover letters</li>
             <li>👤 Profile Summary — LinkedIn / portfolio bios</li>
             <li>🎯 JD Matcher — Resume vs Job Description scoring</li>
+            <li>🎓 Education Extractor — Education & degrees</li>
         </ul>
         <br>
         <p><em>👈 Upload a resume using the sidebar!</em></p>
