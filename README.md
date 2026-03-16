@@ -69,6 +69,7 @@ An intelligent, agentic AI-powered resume chatbot that can parse, analyze, and a
 - Deploy!
 
 📋 Requirements:
+
 streamlit==1.40.0
 langchain>=0.3.25
 langchain-community>=0.3.25
@@ -138,7 +139,9 @@ Query → Embedding → Vector Search → Relevant Chunks → Context
 - Semantic search retrieves relevant content
 
 ⚙️ Configuration
+
 .streamlit/config.toml
+
 [theme]
 primaryColor = "#7C4DFF"
 backgroundColor = "#0f172a"
