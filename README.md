@@ -35,12 +35,10 @@ An intelligent, agentic AI-powered resume chatbot that can parse, analyze, and a
 ## 🚀 Quick Start
 
 ### Prerequisites
-
 - Python 3.9+
 - Groq API Key (free at [console.groq.com](https://console.groq.com/keys))
 
 ### Installation
-
 1. **Clone the repository**
    ```bash
    git clone https://github.com/VijaiVenkatesan/Agentic_AI_Resume_Chatbot.git
@@ -54,14 +52,13 @@ An intelligent, agentic AI-powered resume chatbot that can parse, analyze, and a
    http://localhost:8501
    
 ☁️ Deploy to Streamlit Cloud
-
 1. Push to GitHub:
    - git add .
    - git commit -m "Initial commit"
    - git push origin main
    
 3. Deploy on Streamlit Cloud:
-   - Go to share.streamlit.io
+   - Go to https://share.streamlit.io/
    - Connect your GitHub repository
    Add GROQ_API_KEY in Secrets:
    GROQ_API_KEY = "your-groq-api-key"
@@ -132,7 +129,6 @@ Query → Embedding → Vector Search → Relevant Chunks → Context
 - Supported formats	PDF, DOCX, TXT, JPG, PNG, WEBP
 
 🐛 Troubleshooting
-
 Common Issues
 1. "Resume not loaded" error
 - Ensure file is uploaded successfully
@@ -168,7 +164,6 @@ ChromaDB - Vector database
 LangChain - Text splitting utilities
 
 📧 Contact
-
 Author: V Vijai
 Email: vijaibt1@gmail.com
 GitHub: https://github.com/VijaiVenkatesan
