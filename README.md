@@ -68,21 +68,6 @@ An intelligent, agentic AI-powered resume chatbot that can parse, analyze, and a
    
 - Deploy!
 
-📋 Requirements:
-
-streamlit==1.40.0
-langchain>=0.3.25
-langchain-community>=0.3.25
-langchain-core>=0.3.58
-langchain-text-splitters>=0.3.8
-chromadb==1.5.5
-requests>=2.31.0
-numpy<2.0.0
-tiktoken>=0.7.0
-PyPDF2>=3.0.0
-python-docx>=1.1.0
-Pillow>=10.0.0
-
 🎯 Usage Examples
 Basic Questions
 - "What is the candidate's contact information?"
@@ -138,51 +123,6 @@ Query → Embedding → Vector Search → Relevant Chunks → Context
 - ChromaDB stores embeddings
 - Semantic search retrieves relevant content
 
-⚙️ Configuration
-
-.streamlit/config.toml
-
-[theme]
-primaryColor = "#7C4DFF"
-backgroundColor = "#0f172a"
-secondaryBackgroundColor = "#1e293b"
-textColor = "#e2e8f0"
-
-[server]
-maxUploadSize = 100  # MB
-
-[browser]
-gatherUsageStats = false
-
-🛠️ Customization
-
-Adding New Tools
-1. Create tool class in mcp_tools.py:
-
-class MyCustomTool(MCPTool):
-    name = "my_tool"
-    description = "Tool description"
-    parameters = [
-        ToolParameter("param1", "string", "Description")
-    ]
-    
-    def execute(self, **kwargs) -> ToolResult:
-        # Tool logic here
-        return ToolResult(self.name, True, {"result": "data"})
-        
-2. Register in create_tool_registry():
-   
-def create_tool_registry() -> MCPToolRegistry:
-    reg = MCPToolRegistry()
-    # ... existing tools ...
-    reg.register(MyCustomTool())
-    return reg
-    
-3. Update planning prompt in agent.py
-
-Modifying UI Theme
-Edit CSS in streamlit_app.py within the <style> block.
-
 📈 Performance
   Metric	         Value
 - Resume parsing	2-5 seconds
@@ -228,6 +168,7 @@ ChromaDB - Vector database
 LangChain - Text splitting utilities
 
 📧 Contact
+
 Author: V Vijai
 Email: vijaibt1@gmail.com
 GitHub: https://github.com/VijaiVenkatesan
