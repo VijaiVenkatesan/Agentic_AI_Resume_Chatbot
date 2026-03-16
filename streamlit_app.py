@@ -108,190 +108,6 @@ st.markdown("""
     .model-box p { color: #94a3b8 !important; font-size: 0.8rem; margin: 0.1rem 0; }
     .model-box .lbl { color: #a78bfa !important; font-weight: 700; }
 
-    /* ── AGENT TRACE (HIGH CONTRAST - VERY DARK TEXT) ── */
-    .trace-step {
-        padding: 18px 22px; 
-        margin: 12px 0; 
-        border-radius: 10px;
-        font-size: 1rem; 
-        line-height: 1.8;
-        box-shadow: 0 3px 10px rgba(0,0,0,0.2);
-    }
-    
-    /* Planning Step - Yellow */
-    .trace-plan {
-        background: linear-gradient(135deg, #fef9c3, #fde047) !important;
-        border-left: 6px solid #ca8a04;
-    }
-    .trace-plan * {
-        color: #1c1917 !important;
-    }
-    .trace-plan .trace-title {
-        color: #000000 !important;
-        font-weight: 800 !important;
-        font-size: 1.1rem !important;
-    }
-    .trace-plan .trace-label {
-        color: #78350f !important;
-        font-weight: 700 !important;
-    }
-    .trace-plan .trace-value {
-        color: #1c1917 !important;
-        font-weight: 500 !important;
-    }
-    .trace-plan .trace-time {
-        color: #92400e !important;
-        font-weight: 600 !important;
-    }
-
-    /* Tool Call Step - Green */
-    .trace-tool {
-        background: linear-gradient(135deg, #bbf7d0, #4ade80) !important;
-        border-left: 6px solid #16a34a;
-    }
-    .trace-tool * {
-        color: #052e16 !important;
-    }
-    .trace-tool .trace-title {
-        color: #000000 !important;
-        font-weight: 800 !important;
-        font-size: 1.1rem !important;
-    }
-    .trace-tool .trace-label {
-        color: #14532d !important;
-        font-weight: 700 !important;
-    }
-    .trace-tool .trace-value {
-        color: #052e16 !important;
-        font-weight: 500 !important;
-    }
-    .trace-tool .trace-time {
-        color: #166534 !important;
-        font-weight: 600 !important;
-    }
-
-    /* Synthesis Step - Blue */
-    .trace-synth {
-        background: linear-gradient(135deg, #bfdbfe, #60a5fa) !important;
-        border-left: 6px solid #2563eb;
-    }
-    .trace-synth * {
-        color: #0c1929 !important;
-    }
-    .trace-synth .trace-title {
-        color: #000000 !important;
-        font-weight: 800 !important;
-        font-size: 1.1rem !important;
-    }
-    .trace-synth .trace-label {
-        color: #1e3a8a !important;
-        font-weight: 700 !important;
-    }
-    .trace-synth .trace-value {
-        color: #0c1929 !important;
-        font-weight: 500 !important;
-    }
-    .trace-synth .trace-time {
-        color: #1d4ed8 !important;
-        font-weight: 600 !important;
-    }
-    
-    /* ── Trace Summary Box ── */
-    .trace-summary {
-        background: linear-gradient(135deg, #1e293b, #334155);
-        border: 1px solid #475569;
-        border-radius: 10px;
-        padding: 14px 18px;
-        margin-top: 12px;
-    }
-    .trace-summary span {
-        color: #94a3b8 !important;
-        font-size: 0.9rem;
-    }
-    .trace-summary b {
-        color: #e2e8f0 !important;
-    }
-
-    /* ── Tool Results Section (SEPARATE) ── */
-    .tool-results-section {
-        background: linear-gradient(135deg, #0f172a, #1e293b);
-        border: 1px solid #334155;
-        border-radius: 12px;
-        padding: 16px 20px;
-        margin: 12px 0;
-    }
-    .tool-results-header {
-        color: #a78bfa !important;
-        font-weight: 700;
-        font-size: 1rem;
-        margin-bottom: 12px;
-        padding-bottom: 10px;
-        border-bottom: 1px solid #334155;
-        display: flex;
-        align-items: center;
-        gap: 8px;
-    }
-    .tool-result-item {
-        background: #0f172a;
-        border: 1px solid #334155;
-        border-radius: 8px;
-        padding: 14px 16px;
-        margin: 10px 0;
-    }
-    .tool-result-item-header {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        margin-bottom: 10px;
-        padding-bottom: 8px;
-        border-bottom: 1px solid #1e293b;
-        flex-wrap: wrap;
-    }
-    .tool-result-name {
-        color: #c4b5fd !important;
-        font-weight: 700;
-        font-size: 0.95rem;
-    }
-    .tool-result-status-ok {
-        color: #4ade80 !important;
-        font-weight: 600;
-        background: rgba(34, 197, 94, 0.15);
-        padding: 3px 10px;
-        border-radius: 4px;
-        font-size: 0.8rem;
-    }
-    .tool-result-status-fail {
-        color: #f87171 !important;
-        font-weight: 600;
-        background: rgba(239, 68, 68, 0.15);
-        padding: 3px 10px;
-        border-radius: 4px;
-        font-size: 0.8rem;
-    }
-    .tool-result-time {
-        color: #64748b !important;
-        font-size: 0.75rem;
-        margin-left: auto;
-    }
-    .tool-result-json {
-        background: #020617;
-        border: 1px solid #1e293b;
-        border-radius: 6px;
-        padding: 12px 14px;
-        max-height: 350px;
-        overflow-y: auto;
-    }
-    .tool-result-json pre {
-        color: #cbd5e1 !important;
-        background: transparent !important;
-        margin: 0;
-        white-space: pre-wrap;
-        word-wrap: break-word;
-        font-family: 'Monaco', 'Consolas', 'Courier New', monospace;
-        font-size: 0.8rem;
-        line-height: 1.6;
-    }
-
     /* ── Tool Badges ── */
     .tbadge {
         display: inline-block;
@@ -488,63 +304,98 @@ def reset_all_state():
 
 
 # ══════════════════════════════════════════════════════════
-#    AGENT TRACE DISPLAY (SEPARATE SECTIONS)
+#    AGENT TRACE DISPLAY (USING STREAMLIT NATIVE COMPONENTS)
 # ══════════════════════════════════════════════════════════
 
 def show_trace(steps, tools_used):
-    """Display agent trace with very dark text for visibility"""
+    """Display agent trace using native Streamlit components for proper rendering"""
     
     with st.expander(
         f"🔍 Agent Trace ({len(steps)} steps · Tools: {', '.join(tools_used) if tools_used else 'None'})",
         expanded=False
     ):
         for i, s in enumerate(steps):
-            icon = {
-                "planning": "🎯", 
-                "tool_call": "🔧", 
-                "synthesis": "✨"
-            }.get(s.step_type, "📌")
-
-            css_class = {
-                "planning": "trace-plan",
-                "tool_call": "trace-tool",
-                "synthesis": "trace-synth"
-            }.get(s.step_type, "trace-tool")
-
-            # Build content
-            title = f"{icon} Step {i+1}: {s.step_type.upper()}"
-            details_html = ""
-
-            if s.step_type == "planning" and s.output_data:
-                reasoning = s.output_data.get('reasoning', 'N/A')
-                planned_tools = s.output_data.get('planned_tools', [])
-                planned = ', '.join(planned_tools) if planned_tools else 'None'
-                has_jd = s.output_data.get('has_jd', False)
-                jd_status = "✅ JD Uploaded" if has_jd else "⚠️ No JD Uploaded"
-                details_html = f"""
-                    <br><span class="trace-label">📋 Reasoning:</span> <span class="trace-value">{reasoning}</span>
-                    <br><span class="trace-label">🔧 Planned Tools:</span> <span class="trace-value">{planned}</span>
-                    <br><span class="trace-label">📄 JD Status:</span> <span class="trace-value">{jd_status}</span>
-                """
+            # Determine step type styling
+            if s.step_type == "planning":
+                icon = "🎯"
+                bg_color = "#fef9c3"
+                border_color = "#ca8a04"
+                text_color = "#713f12"
             elif s.step_type == "tool_call":
-                status_icon = "✅" if s.success else "❌"
-                status_text = "Success" if s.success else f"Failed"
-                details_html = f"""
-                    <br><span class="trace-label">Tool:</span> <span class="trace-value">{s.tool_name}</span> {status_icon} {status_text}
-                """
+                icon = "🔧"
+                bg_color = "#bbf7d0"
+                border_color = "#16a34a"
+                text_color = "#14532d"
             elif s.step_type == "synthesis":
-                details_html = f"""
-                    <br><span class="trace-label">Action:</span> <span class="trace-value">Generating final response from tool results</span>
-                """
+                icon = "✨"
+                bg_color = "#bfdbfe"
+                border_color = "#2563eb"
+                text_color = "#1e3a8a"
+            else:
+                icon = "📌"
+                bg_color = "#e2e8f0"
+                border_color = "#64748b"
+                text_color = "#334155"
 
-            # Render step box
-            st.markdown(f"""
-            <div class="trace-step {css_class}">
-                <span class="trace-title">{title}</span>
-                {details_html}
-                <br><span class="trace-time">⏱️ Duration: {s.duration}s</span>
-            </div>
-            """, unsafe_allow_html=True)
+            # Build step content
+            step_title = f"{icon} **Step {i+1}: {s.step_type.upper()}**"
+            
+            # Create container with background color
+            with st.container():
+                st.markdown(f"""
+                <div style="
+                    background: {bg_color};
+                    border-left: 5px solid {border_color};
+                    border-radius: 8px;
+                    padding: 12px 16px;
+                    margin: 8px 0;
+                ">
+                    <p style="color: {text_color}; font-weight: 700; font-size: 1rem; margin: 0 0 8px 0;">
+                        {icon} Step {i+1}: {s.step_type.upper()}
+                    </p>
+                """, unsafe_allow_html=True)
+                
+                if s.step_type == "planning" and s.output_data:
+                    reasoning = s.output_data.get('reasoning', 'N/A')
+                    planned_tools = s.output_data.get('planned_tools', [])
+                    planned = ', '.join(planned_tools) if planned_tools else 'None'
+                    has_jd = s.output_data.get('has_jd', False)
+                    jd_status = "✅ JD Uploaded" if has_jd else "⚠️ No JD Uploaded"
+                    
+                    st.markdown(f"""
+                    <p style="color: {text_color}; margin: 4px 0; font-size: 0.9rem;">
+                        <strong>📋 Reasoning:</strong> {reasoning}
+                    </p>
+                    <p style="color: {text_color}; margin: 4px 0; font-size: 0.9rem;">
+                        <strong>🔧 Planned Tools:</strong> {planned}
+                    </p>
+                    <p style="color: {text_color}; margin: 4px 0; font-size: 0.9rem;">
+                        <strong>📄 JD Status:</strong> {jd_status}
+                    </p>
+                    """, unsafe_allow_html=True)
+                    
+                elif s.step_type == "tool_call":
+                    status_icon = "✅" if s.success else "❌"
+                    status_text = "Success" if s.success else "Failed"
+                    st.markdown(f"""
+                    <p style="color: {text_color}; margin: 4px 0; font-size: 0.9rem;">
+                        <strong>Tool:</strong> {s.tool_name} {status_icon} {status_text}
+                    </p>
+                    """, unsafe_allow_html=True)
+                    
+                elif s.step_type == "synthesis":
+                    st.markdown(f"""
+                    <p style="color: {text_color}; margin: 4px 0; font-size: 0.9rem;">
+                        <strong>Action:</strong> Generating final response from tool results
+                    </p>
+                    """, unsafe_allow_html=True)
+                
+                st.markdown(f"""
+                    <p style="color: {text_color}; margin: 8px 0 0 0; font-size: 0.8rem; opacity: 0.8;">
+                        ⏱️ Duration: {s.duration}s
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
         
         # Summary
         total_time = sum(s.duration for s in steps)
@@ -552,19 +403,25 @@ def show_trace(steps, tools_used):
         total_tools = sum(1 for s in steps if s.step_type == "tool_call")
         
         st.markdown(f"""
-        <div class="trace-summary">
-            <span>
-                📊 <b>Trace Summary:</b> 
+        <div style="
+            background: linear-gradient(135deg, #1e293b, #334155);
+            border: 1px solid #475569;
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin-top: 12px;
+        ">
+            <p style="color: #94a3b8; margin: 0; font-size: 0.9rem;">
+                📊 <strong style="color: #e2e8f0;">Trace Summary:</strong> 
                 {len(steps)} total steps · 
                 {successful_tools}/{total_tools} tools successful · 
-                ⏱️ <b>{round(total_time, 2)}s</b> total time
-            </span>
+                ⏱️ <strong style="color: #e2e8f0;">{round(total_time, 2)}s</strong> total time
+            </p>
         </div>
         """, unsafe_allow_html=True)
 
 
 def show_tool_results(steps):
-    """Display tool results JSON in a SEPARATE section"""
+    """Display tool results JSON in a SEPARATE section using native Streamlit"""
     
     # Filter only tool_call steps
     tool_steps = [s for s in steps if s.step_type == "tool_call"]
@@ -577,11 +434,20 @@ def show_tool_results(steps):
         expanded=False
     ):
         st.markdown("""
-        <div class="tool-results-section">
-            <div class="tool-results-header">
-                <span>📊 Raw Tool Results (JSON)</span>
-                <span style="color:#64748b; font-size:0.8rem; margin-left:auto;">For validation & debugging</span>
-            </div>
+        <div style="
+            background: linear-gradient(135deg, #0f172a, #1e293b);
+            border: 1px solid #334155;
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin-bottom: 12px;
+        ">
+            <p style="color: #a78bfa; font-weight: 700; margin: 0; font-size: 0.95rem;">
+                📊 Raw Tool Results (JSON)
+                <span style="color: #64748b; font-size: 0.8rem; font-weight: 400; margin-left: 10px;">
+                    For validation & debugging
+                </span>
+            </p>
+        </div>
         """, unsafe_allow_html=True)
         
         for s in tool_steps:
@@ -614,29 +480,51 @@ def show_tool_results(steps):
                 result_str = result_str[:max_length]
                 truncated = True
             
-            # Escape HTML
-            result_str = result_str.replace('<', '&lt;').replace('>', '&gt;')
-            
             if truncated:
                 result_str += "\n\n... [truncated - showing first 3000 characters]"
             
-            status_class = "tool-result-status-ok" if s.success else "tool-result-status-fail"
             status_text = "✅ Success" if s.success else "❌ Failed"
+            status_color = "#4ade80" if s.success else "#f87171"
+            status_bg = "rgba(34, 197, 94, 0.15)" if s.success else "rgba(239, 68, 68, 0.15)"
             
+            # Tool header
             st.markdown(f"""
-            <div class="tool-result-item">
-                <div class="tool-result-item-header">
-                    <span class="tool-result-name">🔧 {s.tool_name}</span>
-                    <span class="{status_class}">{status_text}</span>
-                    <span class="tool-result-time">⏱️ {s.duration}s</span>
-                </div>
-                <div class="tool-result-json">
-                    <pre>{result_str}</pre>
+            <div style="
+                background: #0f172a;
+                border: 1px solid #334155;
+                border-radius: 8px;
+                padding: 12px 16px;
+                margin: 10px 0;
+            ">
+                <div style="
+                    display: flex;
+                    align-items: center;
+                    gap: 10px;
+                    margin-bottom: 10px;
+                    padding-bottom: 8px;
+                    border-bottom: 1px solid #1e293b;
+                    flex-wrap: wrap;
+                ">
+                    <span style="color: #c4b5fd; font-weight: 700; font-size: 0.95rem;">
+                        🔧 {s.tool_name}
+                    </span>
+                    <span style="
+                        color: {status_color};
+                        font-weight: 600;
+                        background: {status_bg};
+                        padding: 3px 10px;
+                        border-radius: 4px;
+                        font-size: 0.8rem;
+                    ">{status_text}</span>
+                    <span style="color: #64748b; font-size: 0.75rem; margin-left: auto;">
+                        ⏱️ {s.duration}s
+                    </span>
                 </div>
             </div>
             """, unsafe_allow_html=True)
-        
-        st.markdown("</div>", unsafe_allow_html=True)
+            
+            # JSON output using st.code for proper formatting
+            st.code(result_str, language="json")
 
 
 # ═══════════════════════════════════════════
