@@ -68,7 +68,7 @@ An intelligent, agentic AI-powered resume chatbot that can parse, analyze, and a
    
 - Deploy!
 
-📋 Requirements
+📋 Requirements:
 streamlit==1.40.0
 langchain>=0.3.25
 langchain-community>=0.3.25
@@ -181,12 +181,12 @@ Modifying UI Theme
 Edit CSS in streamlit_app.py within the <style> block.
 
 📈 Performance
-Metric	Value
-Resume parsing	2-5 seconds
-Tool execution	0.5-2 seconds/tool
-Total response	3-10 seconds
-Max file size	100 MB
-Supported formats	PDF, DOCX, TXT, JPG, PNG, WEBP
+  Metric	         Value
+- Resume parsing	2-5 seconds
+- Tool execution	0.5-2 seconds/tool
+- Total response	3-10 seconds
+- Max file size	100 MB
+- Supported formats	PDF, DOCX, TXT, JPG, PNG, WEBP
 
 🐛 Troubleshooting
 
@@ -229,5 +229,5 @@ Author: V Vijai
 Email: vijaibt1@gmail.com
 GitHub: https://github.com/VijaiVenkatesan
 
-<p align="center"> Built with ❤️ using Agentic AI + MCP + RAG + Groq </p><p align="center"> <a href="https://agentic-ai-resume-chatbot.streamlit.app/">🚀 Live Demo</a> • <a href="#-quick-start">📖 Documentation</a> </p> ```
+<p align="center"> Built with ❤️ using Agentic AI + MCP + RAG + Groq </p><p align="center"> <a href="https://agentic-ai-resume-chatbot.streamlit.app/">🚀 Live Demo</a> • <a href="#-quick-start">📖 Documentation</a> </p>
 
