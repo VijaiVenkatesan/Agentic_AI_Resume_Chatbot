@@ -78,7 +78,7 @@ An intelligent, agentic AI-powered resume chatbot that can parse, analyze, and a
 
 ## 📁 Project Structure
 
-resume-chatbot/
+Agentic_AI_Resume_Chatbot/
 ├── streamlit_app.py # Main Streamlit application
 ├── agent.py # Agentic AI orchestrator
 ├── mcp_tools.py # MCP tool implementations
