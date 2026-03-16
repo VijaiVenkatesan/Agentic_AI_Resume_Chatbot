@@ -166,8 +166,11 @@ Common Issues
 🙏 Acknowledgments
 
 Groq - Lightning-fast LLM inference
+
 Streamlit - Amazing web framework
+
 ChromaDB - Vector database
+
 LangChain - Text splitting utilities
 
 📧 Contact
