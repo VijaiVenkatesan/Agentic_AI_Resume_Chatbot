@@ -1,12 +1,13 @@
 """
-Universal Agentic AI Resume Chatbot - V6
-Features: Remove/discard buttons, full-screen preview, agent trace, 100MB upload
+Universal Agentic AI Resume Chatbot - V7
+Features: Enhanced trace visibility, separate tool results section, remove buttons, no hallucination
 """
 
 import streamlit as st
 import os
 import time
 import base64
+import json
 from typing import List, Dict
 
 from document_processor import process_uploaded_file
@@ -22,13 +23,16 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ── MODELS ──
+# ── MODELS (ALL MODELS INCLUDED) ──
 GROQ_MODELS = {
     "Llama 3.1 8B ⚡ (Fast)": {"id": "llama-3.1-8b-instant", "speed": "⚡⚡", "quality": "⭐⭐⭐⭐"},
     "Llama 3.3 70B 🏆 (Best)": {"id": "llama-3.3-70b-versatile", "speed": "🔄", "quality": "⭐⭐⭐⭐⭐"},
     "Llama 4 Scout 🆕": {"id": "meta-llama/llama-4-scout-17b-16e-instruct", "speed": "⚡", "quality": "⭐⭐⭐⭐"},
     "Qwen 3 32B 🧠": {"id": "qwen/qwen3-32b", "speed": "⚡", "quality": "⭐⭐⭐⭐⭐"},
     "Kimi K2 🌙": {"id": "moonshotai/kimi-k2-instruct", "speed": "🔄", "quality": "⭐⭐⭐⭐⭐"},
+    "DeepSeek R1 🔬": {"id": "deepseek-r1-distill-llama-70b", "speed": "🔄", "quality": "⭐⭐⭐⭐⭐"},
+    "Gemma 2 9B 💎": {"id": "gemma2-9b-it", "speed": "⚡⚡", "quality": "⭐⭐⭐⭐"},
+    "Mistral Saba 🌪️": {"id": "mistral-saba-24b", "speed": "⚡", "quality": "⭐⭐⭐⭐"},
     "GPT-OSS 120B 💪": {"id": "openai/gpt-oss-120b", "speed": "🔄", "quality": "⭐⭐⭐⭐⭐"},
     "GPT-OSS 20B ⚡": {"id": "openai/gpt-oss-20b", "speed": "⚡", "quality": "⭐⭐⭐⭐"},
 }
@@ -104,31 +108,189 @@ st.markdown("""
     .model-box p { color: #94a3b8 !important; font-size: 0.8rem; margin: 0.1rem 0; }
     .model-box .lbl { color: #a78bfa !important; font-weight: 700; }
 
-    /* ── AGENT TRACE (HIGH CONTRAST FIX) ── */
+    /* ── AGENT TRACE (HIGH CONTRAST - VERY DARK TEXT) ── */
     .trace-step {
-        padding: 14px 18px; margin: 8px 0; border-radius: 8px;
-        font-size: 0.95rem; line-height: 1.6;
+        padding: 18px 22px; 
+        margin: 12px 0; 
+        border-radius: 10px;
+        font-size: 1rem; 
+        line-height: 1.8;
+        box-shadow: 0 3px 10px rgba(0,0,0,0.2);
     }
+    
+    /* Planning Step - Yellow */
     .trace-plan {
-        background: #fef9c3 !important;
-        border-left: 5px solid #ca8a04;
+        background: linear-gradient(135deg, #fef9c3, #fde047) !important;
+        border-left: 6px solid #ca8a04;
     }
-    .trace-plan strong, .trace-plan span, .trace-plan br,
-    .trace-plan { color: #713f12 !important; }
+    .trace-plan * {
+        color: #1c1917 !important;
+    }
+    .trace-plan .trace-title {
+        color: #000000 !important;
+        font-weight: 800 !important;
+        font-size: 1.1rem !important;
+    }
+    .trace-plan .trace-label {
+        color: #78350f !important;
+        font-weight: 700 !important;
+    }
+    .trace-plan .trace-value {
+        color: #1c1917 !important;
+        font-weight: 500 !important;
+    }
+    .trace-plan .trace-time {
+        color: #92400e !important;
+        font-weight: 600 !important;
+    }
 
+    /* Tool Call Step - Green */
     .trace-tool {
-        background: #bbf7d0 !important;
-        border-left: 5px solid #16a34a;
+        background: linear-gradient(135deg, #bbf7d0, #4ade80) !important;
+        border-left: 6px solid #16a34a;
     }
-    .trace-tool strong, .trace-tool span, .trace-tool br,
-    .trace-tool { color: #14532d !important; }
+    .trace-tool * {
+        color: #052e16 !important;
+    }
+    .trace-tool .trace-title {
+        color: #000000 !important;
+        font-weight: 800 !important;
+        font-size: 1.1rem !important;
+    }
+    .trace-tool .trace-label {
+        color: #14532d !important;
+        font-weight: 700 !important;
+    }
+    .trace-tool .trace-value {
+        color: #052e16 !important;
+        font-weight: 500 !important;
+    }
+    .trace-tool .trace-time {
+        color: #166534 !important;
+        font-weight: 600 !important;
+    }
 
+    /* Synthesis Step - Blue */
     .trace-synth {
-        background: #bfdbfe !important;
-        border-left: 5px solid #2563eb;
+        background: linear-gradient(135deg, #bfdbfe, #60a5fa) !important;
+        border-left: 6px solid #2563eb;
     }
-    .trace-synth strong, .trace-synth span, .trace-synth br,
-    .trace-synth { color: #1e3a8a !important; }
+    .trace-synth * {
+        color: #0c1929 !important;
+    }
+    .trace-synth .trace-title {
+        color: #000000 !important;
+        font-weight: 800 !important;
+        font-size: 1.1rem !important;
+    }
+    .trace-synth .trace-label {
+        color: #1e3a8a !important;
+        font-weight: 700 !important;
+    }
+    .trace-synth .trace-value {
+        color: #0c1929 !important;
+        font-weight: 500 !important;
+    }
+    .trace-synth .trace-time {
+        color: #1d4ed8 !important;
+        font-weight: 600 !important;
+    }
+    
+    /* ── Trace Summary Box ── */
+    .trace-summary {
+        background: linear-gradient(135deg, #1e293b, #334155);
+        border: 1px solid #475569;
+        border-radius: 10px;
+        padding: 14px 18px;
+        margin-top: 12px;
+    }
+    .trace-summary span {
+        color: #94a3b8 !important;
+        font-size: 0.9rem;
+    }
+    .trace-summary b {
+        color: #e2e8f0 !important;
+    }
+
+    /* ── Tool Results Section (SEPARATE) ── */
+    .tool-results-section {
+        background: linear-gradient(135deg, #0f172a, #1e293b);
+        border: 1px solid #334155;
+        border-radius: 12px;
+        padding: 16px 20px;
+        margin: 12px 0;
+    }
+    .tool-results-header {
+        color: #a78bfa !important;
+        font-weight: 700;
+        font-size: 1rem;
+        margin-bottom: 12px;
+        padding-bottom: 10px;
+        border-bottom: 1px solid #334155;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+    .tool-result-item {
+        background: #0f172a;
+        border: 1px solid #334155;
+        border-radius: 8px;
+        padding: 14px 16px;
+        margin: 10px 0;
+    }
+    .tool-result-item-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 10px;
+        padding-bottom: 8px;
+        border-bottom: 1px solid #1e293b;
+        flex-wrap: wrap;
+    }
+    .tool-result-name {
+        color: #c4b5fd !important;
+        font-weight: 700;
+        font-size: 0.95rem;
+    }
+    .tool-result-status-ok {
+        color: #4ade80 !important;
+        font-weight: 600;
+        background: rgba(34, 197, 94, 0.15);
+        padding: 3px 10px;
+        border-radius: 4px;
+        font-size: 0.8rem;
+    }
+    .tool-result-status-fail {
+        color: #f87171 !important;
+        font-weight: 600;
+        background: rgba(239, 68, 68, 0.15);
+        padding: 3px 10px;
+        border-radius: 4px;
+        font-size: 0.8rem;
+    }
+    .tool-result-time {
+        color: #64748b !important;
+        font-size: 0.75rem;
+        margin-left: auto;
+    }
+    .tool-result-json {
+        background: #020617;
+        border: 1px solid #1e293b;
+        border-radius: 6px;
+        padding: 12px 14px;
+        max-height: 350px;
+        overflow-y: auto;
+    }
+    .tool-result-json pre {
+        color: #cbd5e1 !important;
+        background: transparent !important;
+        margin: 0;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        font-family: 'Monaco', 'Consolas', 'Courier New', monospace;
+        font-size: 0.8rem;
+        line-height: 1.6;
+    }
 
     /* ── Tool Badges ── */
     .tbadge {
@@ -205,11 +367,6 @@ st.markdown("""
         border-color: #7c3aed; box-shadow: 0 0 12px rgba(124,58,237,0.3);
     }
 
-    /* ── Remove Button (X) Styling ── */
-    button[kind="secondary"] {
-        background: transparent !important;
-    }
-
     /* ── Text Areas ── */
     .stTextArea textarea {
         color: #e2e8f0 !important; background: #1e293b !important;
@@ -283,33 +440,6 @@ st.markdown("""
         border-radius: 8px;
         box-shadow: 0 4px 20px rgba(0,0,0,0.3);
     }
-    
-    .download-btn {
-        display: inline-block;
-        background: linear-gradient(135deg, #059669, #10b981);
-        color: #fff !important;
-        padding: 10px 20px;
-        border-radius: 8px;
-        font-size: 0.9rem;
-        text-decoration: none;
-        font-weight: 600;
-        margin: 5px;
-        transition: all 0.2s;
-    }
-    
-    .download-btn:hover {
-        box-shadow: 0 4px 15px rgba(16, 185, 129, 0.4);
-        transform: translateY(-2px);
-    }
-    
-    /* ── File loaded indicator ── */
-    .file-loaded-box {
-        background: linear-gradient(135deg, #1e293b, #334155);
-        border: 1px solid #22c55e;
-        border-radius: 8px;
-        padding: 0.5rem 0.75rem;
-        margin: 0.25rem 0;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -357,21 +487,156 @@ def reset_all_state():
             st.session_state[key] = default_state[key]
 
 
-def get_file_download_link(file_bytes, file_name, file_type, link_text="📥 Download File"):
-    """Generate a download link for a file"""
-    b64 = base64.b64encode(file_bytes).decode()
-    mime_types = {
-        ".pdf": "application/pdf",
-        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        ".doc": "application/msword",
-        ".txt": "text/plain",
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".png": "image/png",
-        ".webp": "image/webp",
-    }
-    mime = mime_types.get(file_type.lower(), "application/octet-stream")
-    return f'<a href="data:{mime};base64,{b64}" download="{file_name}" class="download-btn">{link_text}</a>'
+# ══════════════════════════════════════════════════════════
+#    AGENT TRACE DISPLAY (SEPARATE SECTIONS)
+# ══════════════════════════════════════════════════════════
+
+def show_trace(steps, tools_used):
+    """Display agent trace with very dark text for visibility"""
+    
+    with st.expander(
+        f"🔍 Agent Trace ({len(steps)} steps · Tools: {', '.join(tools_used) if tools_used else 'None'})",
+        expanded=False
+    ):
+        for i, s in enumerate(steps):
+            icon = {
+                "planning": "🎯", 
+                "tool_call": "🔧", 
+                "synthesis": "✨"
+            }.get(s.step_type, "📌")
+
+            css_class = {
+                "planning": "trace-plan",
+                "tool_call": "trace-tool",
+                "synthesis": "trace-synth"
+            }.get(s.step_type, "trace-tool")
+
+            # Build content
+            title = f"{icon} Step {i+1}: {s.step_type.upper()}"
+            details_html = ""
+
+            if s.step_type == "planning" and s.output_data:
+                reasoning = s.output_data.get('reasoning', 'N/A')
+                planned_tools = s.output_data.get('planned_tools', [])
+                planned = ', '.join(planned_tools) if planned_tools else 'None'
+                has_jd = s.output_data.get('has_jd', False)
+                jd_status = "✅ JD Uploaded" if has_jd else "⚠️ No JD Uploaded"
+                details_html = f"""
+                    <br><span class="trace-label">📋 Reasoning:</span> <span class="trace-value">{reasoning}</span>
+                    <br><span class="trace-label">🔧 Planned Tools:</span> <span class="trace-value">{planned}</span>
+                    <br><span class="trace-label">📄 JD Status:</span> <span class="trace-value">{jd_status}</span>
+                """
+            elif s.step_type == "tool_call":
+                status_icon = "✅" if s.success else "❌"
+                status_text = "Success" if s.success else f"Failed"
+                details_html = f"""
+                    <br><span class="trace-label">Tool:</span> <span class="trace-value">{s.tool_name}</span> {status_icon} {status_text}
+                """
+            elif s.step_type == "synthesis":
+                details_html = f"""
+                    <br><span class="trace-label">Action:</span> <span class="trace-value">Generating final response from tool results</span>
+                """
+
+            # Render step box
+            st.markdown(f"""
+            <div class="trace-step {css_class}">
+                <span class="trace-title">{title}</span>
+                {details_html}
+                <br><span class="trace-time">⏱️ Duration: {s.duration}s</span>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # Summary
+        total_time = sum(s.duration for s in steps)
+        successful_tools = sum(1 for s in steps if s.step_type == "tool_call" and s.success)
+        total_tools = sum(1 for s in steps if s.step_type == "tool_call")
+        
+        st.markdown(f"""
+        <div class="trace-summary">
+            <span>
+                📊 <b>Trace Summary:</b> 
+                {len(steps)} total steps · 
+                {successful_tools}/{total_tools} tools successful · 
+                ⏱️ <b>{round(total_time, 2)}s</b> total time
+            </span>
+        </div>
+        """, unsafe_allow_html=True)
+
+
+def show_tool_results(steps):
+    """Display tool results JSON in a SEPARATE section"""
+    
+    # Filter only tool_call steps
+    tool_steps = [s for s in steps if s.step_type == "tool_call"]
+    
+    if not tool_steps:
+        return
+    
+    with st.expander(
+        f"📊 Tool Results ({len(tool_steps)} tools)",
+        expanded=False
+    ):
+        st.markdown("""
+        <div class="tool-results-section">
+            <div class="tool-results-header">
+                <span>📊 Raw Tool Results (JSON)</span>
+                <span style="color:#64748b; font-size:0.8rem; margin-left:auto;">For validation & debugging</span>
+            </div>
+        """, unsafe_allow_html=True)
+        
+        for s in tool_steps:
+            result_data = s.output_data
+            
+            # Get the preview or full data
+            if result_data:
+                if 'preview' in result_data:
+                    display_data = result_data['preview']
+                elif 'error' in result_data:
+                    display_data = {"error": result_data['error']}
+                else:
+                    display_data = result_data
+            else:
+                display_data = {"message": "No data returned"}
+            
+            # Format JSON
+            if isinstance(display_data, (dict, list)):
+                try:
+                    result_str = json.dumps(display_data, indent=2, default=str, ensure_ascii=False)
+                except:
+                    result_str = str(display_data)
+            else:
+                result_str = str(display_data)
+            
+            # Truncate if too long
+            max_length = 3000
+            truncated = False
+            if len(result_str) > max_length:
+                result_str = result_str[:max_length]
+                truncated = True
+            
+            # Escape HTML
+            result_str = result_str.replace('<', '&lt;').replace('>', '&gt;')
+            
+            if truncated:
+                result_str += "\n\n... [truncated - showing first 3000 characters]"
+            
+            status_class = "tool-result-status-ok" if s.success else "tool-result-status-fail"
+            status_text = "✅ Success" if s.success else "❌ Failed"
+            
+            st.markdown(f"""
+            <div class="tool-result-item">
+                <div class="tool-result-item-header">
+                    <span class="tool-result-name">🔧 {s.tool_name}</span>
+                    <span class="{status_class}">{status_text}</span>
+                    <span class="tool-result-time">⏱️ {s.duration}s</span>
+                </div>
+                <div class="tool-result-json">
+                    <pre>{result_str}</pre>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
 # ═══════════════════════════════════════════
@@ -654,10 +919,9 @@ with st.sidebar:
             "Give me the complete work experience",
             "Calculate total years of experience",
             "What is the educational background?",
-            "Match skills: Python, AWS, Docker, Kubernetes",
+            "What certifications are listed?",
             "Write a cover letter for Senior Engineer at Google",
             "Write a LinkedIn summary",
-            "What certifications are listed?",
             "What are the key achievements?",
         ]
 
@@ -814,41 +1078,7 @@ if not GROQ_API_KEY:
     st.stop()
 
 
-def show_trace(steps, tools_used):
-    with st.expander(
-        f"🔍 Agent Trace ({len(steps)} steps · Tools: {', '.join(tools_used)})",
-        expanded=False
-    ):
-        for i, s in enumerate(steps):
-            icon = {
-                "planning": "🎯", "tool_call": "🔧", "synthesis": "✨"
-            }.get(s.step_type, "📌")
-
-            css_class = {
-                "planning": "trace-plan",
-                "tool_call": "trace-tool",
-                "synthesis": "trace-synth"
-            }.get(s.step_type, "trace-tool")
-
-            title = f"{icon} Step {i+1}: {s.step_type.upper()}"
-            details = ""
-
-            if s.step_type == "planning" and s.output_data:
-                reasoning = s.output_data.get('reasoning', 'N/A')
-                planned = ', '.join(s.output_data.get('planned_tools', []))
-                details = f"<br><b>Plan:</b> {reasoning}<br><b>Tools:</b> {planned}"
-            elif s.step_type == "tool_call":
-                status = "✅" if s.success else "❌"
-                details = f" — <b>{s.tool_name}</b> {status}"
-
-            st.markdown(f"""
-            <div class="trace-step {css_class}">
-                <strong style="font-size:1rem;">{title}{details}</strong>
-                <span style="opacity:0.7;"> ({s.duration}s)</span>
-            </div>
-            """, unsafe_allow_html=True)
-
-
+# ── Welcome Screen ──
 if not st.session_state.resume_loaded:
     st.markdown("""
     <div class="welcome-box">
@@ -867,11 +1097,11 @@ if not st.session_state.resume_loaded:
         <p><strong>🔧 7 MCP Tools + Optional JD Matching:</strong></p>
         <ul>
             <li>📄 Resume Search — RAG semantic search</li>
-            <li>📊 Skill Analyzer — Match skills vs requirements</li>
+            <li>📊 Skill Analyzer — Extract and analyze skills</li>
             <li>💼 Experience Calculator — Years breakdown</li>
             <li>📝 Cover Letter Generator — Tailored cover letters</li>
             <li>👤 Profile Summary — LinkedIn / portfolio bios</li>
-            <li>🎯 JD Matcher — Resume vs Job Description scoring</li>
+            <li>🎯 JD Matcher — Resume vs Job Description (requires JD upload)</li>
             <li>🎓 Education Extractor — Degrees, GPA, certifications</li>
         </ul>
         <br>
@@ -881,6 +1111,7 @@ if not st.session_state.resume_loaded:
     st.stop()
 
 
+# ── Display Chat History ──
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
@@ -905,10 +1136,15 @@ for msg in st.session_state.messages:
                     unsafe_allow_html=True
                 )
 
+            # Show Agent Trace (SECTION 1)
             if st.session_state.show_agent_trace and msg.get("steps"):
                 show_trace(msg["steps"], msg.get("tools_used", []))
+                
+                # Show Tool Results (SECTION 2 - SEPARATE)
+                show_tool_results(msg["steps"])
 
 
+# ── Agent Runner ──
 def run_agent(question: str):
     mi = GROQ_MODELS[st.session_state.selected_model]
     jd = st.session_state.jd_text if st.session_state.jd_loaded else ""
@@ -918,6 +1154,7 @@ def run_agent(question: str):
     return agent.run(question, st.session_state.messages), mi
 
 
+# ── Handle Sidebar Suggestion ──
 if "pending_question" in st.session_state:
     q = st.session_state.pending_question
     del st.session_state.pending_question
@@ -935,6 +1172,7 @@ if "pending_question" in st.session_state:
     st.rerun()
 
 
+# ── Chat Input ──
 if prompt := st.chat_input("Ask anything about the uploaded resume..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
 
@@ -962,8 +1200,12 @@ if prompt := st.chat_input("Ask anything about the uploaded resume..."):
                 unsafe_allow_html=True
             )
 
+        # Show Agent Trace (SECTION 1)
         if st.session_state.show_agent_trace:
             show_trace(result.steps, result.tools_used)
+            
+            # Show Tool Results (SECTION 2 - SEPARATE)
+            show_tool_results(result.steps)
 
     st.session_state.messages.append({
         "role": "assistant", "content": result.answer,
@@ -972,12 +1214,12 @@ if prompt := st.chat_input("Ask anything about the uploaded resume..."):
     })
 
 
+# ── Footer ──
 st.markdown("---")
 st.markdown(
     '<p class="app-footer">'
     'Built with ❤️ using Agentic AI + MCP + RAG + Groq · '
-    '100% Free · '
-    '<a href="https://github.com" target="_blank">GitHub</a>'
+    '100% Free · No Hallucination · Original Data Only'
     '</p>',
     unsafe_allow_html=True
 )
