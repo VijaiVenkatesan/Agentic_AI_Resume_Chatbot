@@ -21,6 +21,7 @@ An intelligent, agentic AI-powered resume chatbot that can parse, analyze, and a
 - **🌙 Dark Mode UI** - Modern, responsive interface
 
 ## 🏗️ Architecture
+
 ┌─────────────────────────────────────────────────────────────┐
 │ Streamlit UI │
 │ ┌─────────────┐ ┌─────────────┐ ┌─────────────────────┐ │
@@ -76,6 +77,7 @@ An intelligent, agentic AI-powered resume chatbot that can parse, analyze, and a
 | 7 | 🎓 `education_extractor` | Extract education, degrees, GPA, certifications |
 
 ## 📁 Project Structure
+
 resume-chatbot/
 ├── streamlit_app.py # Main Streamlit application
 ├── agent.py # Agentic AI orchestrator
