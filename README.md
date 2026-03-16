@@ -84,7 +84,7 @@ Content Generation
 - "Create an elevator pitch"
 
 JD Matching (with uploaded JD)
--"Compare this resume against the job description"
+- "Compare this resume against the job description"
 - "How well does this candidate fit the JD?"
 - "What are the strengths and gaps?"
 
