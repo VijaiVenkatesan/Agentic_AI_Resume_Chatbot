@@ -5,7 +5,7 @@ An intelligent, agentic AI-powered resume chatbot that can parse, analyze, and a
 ![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.28+-red.svg)
 ![Groq](https://img.shields.io/badge/Groq-LLM-green.svg)
-![License](https://img.shields.io/badge/License-MIT-yellow.svg)
+
 
 ## ✨ Features
 
