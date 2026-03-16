@@ -60,7 +60,7 @@ An intelligent, agentic AI-powered resume chatbot that can parse, analyze, and a
 3. Deploy on Streamlit Cloud:
    - Go to https://share.streamlit.io/
    - Connect your GitHub repository
-   Add GROQ_API_KEY in Secrets:
+   - Add GROQ_API_KEY in Secrets:
    GROQ_API_KEY = "your-groq-api-key"
    
 - Deploy!
@@ -164,8 +164,11 @@ ChromaDB - Vector database
 LangChain - Text splitting utilities
 
 📧 Contact
+
 Author: V Vijai
+
 Email: vijaibt1@gmail.com
+
 GitHub: https://github.com/VijaiVenkatesan
 
 <p align="center"> Built with ❤️ using Agentic AI + MCP + RAG + Groq </p><p align="center"> <a href="https://agentic-ai-resume-chatbot.streamlit.app/">🚀 Live Demo</a> • <a href="#-quick-start">📖 Documentation</a> </p>
