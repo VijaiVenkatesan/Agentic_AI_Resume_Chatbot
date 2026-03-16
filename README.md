@@ -66,6 +66,7 @@ An intelligent, agentic AI-powered resume chatbot that can parse, analyze, and a
 - Deploy!
 
 🎯 Usage Examples
+
 Basic Questions
 - "What is the candidate's contact information?"
 - "List all technical skills"
@@ -88,6 +89,7 @@ JD Matching (with uploaded JD)
 - "What are the strengths and gaps?"
 
 🔑 Supported AI Models
+
 Model	Speed	Quality	Best For
 - Llama 3.1 8B	⚡⚡ Fast	⭐⭐⭐⭐	Quick queries
 - Llama 3.3 70B	🔄 Medium	⭐⭐⭐⭐⭐	Complex analysis
@@ -95,6 +97,7 @@ Model	Speed	Quality	Best For
 - Qwen 3 32B	⚡ Fast	⭐⭐⭐⭐⭐	Detailed parsing
 
 📊 How It Works
+
 1. Document Processing
 Upload → Detect Type → Extract Text → Clean & Structure
 - PDF: PyPDF2 extraction with text cleaning
@@ -121,6 +124,7 @@ Query → Embedding → Vector Search → Relevant Chunks → Context
 - Semantic search retrieves relevant content
 
 📈 Performance
+
   Metric	         Value
 - Resume parsing	2-5 seconds
 - Tool execution	0.5-2 seconds/tool
@@ -129,6 +133,7 @@ Query → Embedding → Vector Search → Relevant Chunks → Context
 - Supported formats	PDF, DOCX, TXT, JPG, PNG, WEBP
 
 🐛 Troubleshooting
+
 Common Issues
 1. "Resume not loaded" error
 - Ensure file is uploaded successfully
@@ -151,6 +156,7 @@ Common Issues
 - Use Download button for original file
 
 🤝 Contributing
+
 1. Fork the repository
 2. Create feature branch (git checkout -b feature/amazing)
 3. Commit changes (git commit -m 'Add amazing feature')
@@ -158,6 +164,7 @@ Common Issues
 5. Open a Pull Request
 
 🙏 Acknowledgments
+
 Groq - Lightning-fast LLM inference
 Streamlit - Amazing web framework
 ChromaDB - Vector database
