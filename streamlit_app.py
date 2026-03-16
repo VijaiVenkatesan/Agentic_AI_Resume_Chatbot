@@ -1,6 +1,6 @@
 """
-Universal Agentic AI Resume Chatbot - V5
-Fixes: Preview blocking, new tab, DOCX full text, proper reset, all formats support
+Universal Agentic AI Resume Chatbot - V6
+Features: Remove/discard buttons, full-screen preview, agent trace, 100MB upload
 """
 
 import streamlit as st
@@ -205,6 +205,11 @@ st.markdown("""
         border-color: #7c3aed; box-shadow: 0 0 12px rgba(124,58,237,0.3);
     }
 
+    /* ── Remove Button (X) Styling ── */
+    button[kind="secondary"] {
+        background: transparent !important;
+    }
+
     /* ── Text Areas ── */
     .stTextArea textarea {
         color: #e2e8f0 !important; background: #1e293b !important;
@@ -296,6 +301,15 @@ st.markdown("""
         box-shadow: 0 4px 15px rgba(16, 185, 129, 0.4);
         transform: translateY(-2px);
     }
+    
+    /* ── File loaded indicator ── */
+    .file-loaded-box {
+        background: linear-gradient(135deg, #1e293b, #334155);
+        border: 1px solid #22c55e;
+        border-radius: 8px;
+        padding: 0.5rem 0.75rem;
+        margin: 0.25rem 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -316,6 +330,7 @@ def get_default_state():
         "jd_file_info": None,
         "file_key": None,
         "jd_file_key": None,
+        "jd_source": None,
         "show_preview_modal": False,
         "raw_file_bytes": None,
         "raw_file_name": None,
@@ -340,19 +355,11 @@ def reset_all_state():
     for key in list(st.session_state.keys()):
         if key in default_state:
             st.session_state[key] = default_state[key]
-        elif key not in ["resume_up", "jd_up", "jd_paste"]:
-            # Don't delete widget keys
-            try:
-                del st.session_state[key]
-            except:
-                pass
 
 
 def get_file_download_link(file_bytes, file_name, file_type, link_text="📥 Download File"):
     """Generate a download link for a file"""
     b64 = base64.b64encode(file_bytes).decode()
-    
-    # Determine MIME type
     mime_types = {
         ".pdf": "application/pdf",
         ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -364,7 +371,6 @@ def get_file_download_link(file_bytes, file_name, file_type, link_text="📥 Dow
         ".webp": "image/webp",
     }
     mime = mime_types.get(file_type.lower(), "application/octet-stream")
-    
     return f'<a href="data:{mime};base64,{b64}" download="{file_name}" class="download-btn">{link_text}</a>'
 
 
@@ -379,60 +385,82 @@ with st.sidebar:
         <p>Works for any domain · Any format</p>
     </div>""", unsafe_allow_html=True)
 
-    resume_file = st.file_uploader(
-        "Upload Resume",
-        type=["pdf", "docx", "doc", "txt", "jpg", "jpeg", "png", "webp"],
-        label_visibility="collapsed",
-        key="resume_uploader"
-    )
+    # Show upload or remove button based on state
+    if not st.session_state.resume_loaded:
+        resume_file = st.file_uploader(
+            "Upload Resume",
+            type=["pdf", "docx", "doc", "txt", "jpg", "jpeg", "png", "webp"],
+            label_visibility="collapsed",
+            key="resume_uploader"
+        )
 
-    if resume_file:
-        fk = f"{resume_file.name}_{resume_file.size}"
-        if not st.session_state.resume_loaded or st.session_state.file_key != fk:
-            # Store raw file bytes for preview
-            resume_file.seek(0)
-            raw_bytes = resume_file.read()
-            resume_file.seek(0)
-            
-            st.session_state.raw_file_bytes = raw_bytes
-            st.session_state.raw_file_name = resume_file.name
-            st.session_state.raw_file_type = os.path.splitext(resume_file.name)[1].lower()
-            
-            with st.spinner("📄 Processing document..."):
-                result = process_uploaded_file(resume_file, GROQ_API_KEY)
+        if resume_file:
+            fk = f"{resume_file.name}_{resume_file.size}"
+            if not st.session_state.resume_loaded or st.session_state.file_key != fk:
+                resume_file.seek(0)
+                raw_bytes = resume_file.read()
+                resume_file.seek(0)
+                
+                st.session_state.raw_file_bytes = raw_bytes
+                st.session_state.raw_file_name = resume_file.name
+                st.session_state.raw_file_type = os.path.splitext(resume_file.name)[1].lower()
+                
+                with st.spinner("📄 Processing document..."):
+                    result = process_uploaded_file(resume_file, GROQ_API_KEY)
 
-            if result["success"]:
-                st.session_state.resume_text = result["text"]
-                st.session_state.file_info = result
-                st.session_state.file_key = fk
+                if result["success"]:
+                    st.session_state.resume_text = result["text"]
+                    st.session_state.file_info = result
+                    st.session_state.file_key = fk
 
-                with st.spinner("🧠 Parsing resume with AI..."):
-                    mid = GROQ_MODELS[st.session_state.selected_model]["id"]
-                    parsed = parse_resume_with_llm(result["text"], GROQ_API_KEY, mid)
-                    st.session_state.parsed_resume = parsed
+                    with st.spinner("🧠 Parsing resume with AI..."):
+                        mid = GROQ_MODELS[st.session_state.selected_model]["id"]
+                        parsed = parse_resume_with_llm(result["text"], GROQ_API_KEY, mid)
+                        st.session_state.parsed_resume = parsed
 
-                with st.spinner("🔧 Initializing AI tools..."):
-                    reg = create_tool_registry()
-                    reg.set_resume_data(parsed, result["text"])
-                    st.session_state.tool_registry = reg
+                    with st.spinner("🔧 Initializing AI tools..."):
+                        reg = create_tool_registry()
+                        reg.set_resume_data(parsed, result["text"])
+                        st.session_state.tool_registry = reg
 
-                st.session_state.resume_loaded = True
-                st.session_state.messages = []
-                st.rerun()
-            else:
-                st.error(f"❌ {result['error']}")
-
-    # ── Show success after rerun ──
-    if st.session_state.resume_loaded and st.session_state.file_info:
+                    st.session_state.resume_loaded = True
+                    st.session_state.messages = []
+                    st.rerun()
+                else:
+                    st.error(f"❌ {result['error']}")
+    else:
+        # Resume is loaded - show file info with remove button
         fi = st.session_state.file_info
-        st.success(f"✅ {fi['file_name']} ({fi['file_size_kb']} KB)")
         
-        # View Resume Button
+        col_file, col_remove = st.columns([5, 1])
+        with col_file:
+            st.success(f"✅ {fi['file_name']}")
+        with col_remove:
+            if st.button("❌", key="remove_resume", help="Remove resume"):
+                st.session_state.resume_text = ""
+                st.session_state.parsed_resume = None
+                st.session_state.resume_loaded = False
+                st.session_state.file_info = None
+                st.session_state.tool_registry = None
+                st.session_state.file_key = None
+                st.session_state.raw_file_bytes = None
+                st.session_state.raw_file_name = None
+                st.session_state.raw_file_type = None
+                st.session_state.messages = []
+                st.session_state.show_preview_modal = False
+                st.session_state.jd_text = ""
+                st.session_state.jd_loaded = False
+                st.session_state.jd_file_info = None
+                st.session_state.jd_file_key = None
+                st.session_state.jd_source = None
+                st.rerun()
+        
+        st.caption(f"📊 {fi['file_size_kb']} KB · {fi['file_type'].upper().replace('.', '')}")
+        
         if st.button("👁️ View Full Resume", key="open_preview", use_container_width=True):
             st.session_state.show_preview_modal = True
             st.rerun()
         
-        # Download button
         if st.session_state.raw_file_bytes:
             st.download_button(
                 label="📥 Download Resume",
@@ -490,45 +518,80 @@ with st.sidebar:
         <p>Upload or paste JD to compare</p>
     </div>""", unsafe_allow_html=True)
 
-    jd_file = st.file_uploader(
-        "Upload JD", type=["pdf", "docx", "doc", "txt"],
-        label_visibility="collapsed", key="jd_uploader"
-    )
-
-    if jd_file:
-        jd_fk = f"jd_{jd_file.name}_{jd_file.size}"
-        if not st.session_state.jd_loaded or st.session_state.jd_file_key != jd_fk:
-            with st.spinner("📋 Processing JD..."):
-                jd_result = process_uploaded_file(jd_file, GROQ_API_KEY)
-            if jd_result["success"]:
-                st.session_state.jd_text = jd_result["text"]
-                st.session_state.jd_loaded = True
-                st.session_state.jd_file_key = jd_fk
-                st.session_state.jd_file_info = jd_result
-                if st.session_state.tool_registry:
-                    st.session_state.tool_registry.set_jd_text(jd_result["text"])
-                st.rerun()
-            else:
-                st.error(f"❌ {jd_result['error']}")
-
-    if st.session_state.jd_loaded:
-        st.success("✅ Job Description loaded")
-        with st.expander("👁️ View Job Description"):
-            st.text_area("JD", st.session_state.jd_text, height=200,
-                        disabled=True, label_visibility="collapsed")
-
     if not st.session_state.jd_loaded:
+        jd_file = st.file_uploader(
+            "Upload JD", type=["pdf", "docx", "doc", "txt"],
+            label_visibility="collapsed", key="jd_uploader"
+        )
+
+        if jd_file:
+            jd_fk = f"jd_{jd_file.name}_{jd_file.size}"
+            if not st.session_state.jd_loaded or st.session_state.jd_file_key != jd_fk:
+                with st.spinner("📋 Processing JD..."):
+                    jd_result = process_uploaded_file(jd_file, GROQ_API_KEY)
+                if jd_result["success"]:
+                    st.session_state.jd_text = jd_result["text"]
+                    st.session_state.jd_loaded = True
+                    st.session_state.jd_file_key = jd_fk
+                    st.session_state.jd_file_info = jd_result
+                    st.session_state.jd_source = "file"
+                    if st.session_state.tool_registry:
+                        st.session_state.tool_registry.set_jd_text(jd_result["text"])
+                    st.rerun()
+                else:
+                    st.error(f"❌ {jd_result['error']}")
+
         jd_paste = st.text_area(
-            "Or paste JD text:", height=120, key="jd_paste_area",
+            "Or paste JD text:", 
+            height=120, 
+            key="jd_paste_area",
             placeholder="Paste job description here (optional)...",
             max_chars=50000,
         )
+        
         if jd_paste and len(jd_paste.strip()) > 50:
-            st.session_state.jd_text = jd_paste
-            st.session_state.jd_loaded = True
-            if st.session_state.tool_registry:
-                st.session_state.tool_registry.set_jd_text(jd_paste)
-            st.rerun()
+            if st.button("✅ Use This JD", key="use_pasted_jd", use_container_width=True):
+                st.session_state.jd_text = jd_paste
+                st.session_state.jd_loaded = True
+                st.session_state.jd_source = "pasted"
+                st.session_state.jd_file_info = {
+                    "file_name": "Pasted JD",
+                    "file_size_kb": round(len(jd_paste) / 1024, 1),
+                    "file_type": "text"
+                }
+                if st.session_state.tool_registry:
+                    st.session_state.tool_registry.set_jd_text(jd_paste)
+                st.rerun()
+    else:
+        jd_info = st.session_state.jd_file_info or {}
+        jd_name = jd_info.get("file_name", "Job Description")
+        jd_size = jd_info.get("file_size_kb", 0)
+        
+        col_jd, col_jd_remove = st.columns([5, 1])
+        with col_jd:
+            st.success(f"✅ {jd_name}")
+        with col_jd_remove:
+            if st.button("❌", key="remove_jd", help="Remove JD"):
+                st.session_state.jd_text = ""
+                st.session_state.jd_loaded = False
+                st.session_state.jd_file_info = None
+                st.session_state.jd_file_key = None
+                st.session_state.jd_source = None
+                if st.session_state.tool_registry:
+                    st.session_state.tool_registry.set_jd_text("")
+                st.rerun()
+        
+        if jd_size:
+            st.caption(f"📊 {jd_size} KB")
+        
+        with st.expander("👁️ View Job Description"):
+            st.text_area(
+                "JD Content", 
+                st.session_state.jd_text, 
+                height=200,
+                disabled=True, 
+                label_visibility="collapsed"
+            )
 
     st.markdown("---")
 
@@ -572,7 +635,7 @@ with st.sidebar:
         ("📝", "cover_letter", "Cover letters"),
         ("👤", "profile_summary", "Professional bios"),
         ("🎯", "jd_matcher", "JD comparison"),
-        ("🎓", "education_extractor", "Education & degrees"),  # NEW TOOL
+        ("🎓", "education_extractor", "Education & degrees"),
     ]:
         st.caption(f"{icon} **{tname}**: {desc}")
 
@@ -590,12 +653,12 @@ with st.sidebar:
             "What are the key technical skills?",
             "Give me the complete work experience",
             "Calculate total years of experience",
+            "What is the educational background?",
             "Match skills: Python, AWS, Docker, Kubernetes",
             "Write a cover letter for Senior Engineer at Google",
             "Write a LinkedIn summary",
             "What certifications are listed?",
-            "What are the key achievements with numbers?",
-            "What is the educational background?",
+            "What are the key achievements?",
         ]
 
         if st.session_state.jd_loaded:
@@ -615,7 +678,7 @@ with st.sidebar:
             st.session_state.messages = []
             st.rerun()
     with c2:
-        if st.button("📄 New Resume", use_container_width=True, key="new_resume_btn"):
+        if st.button("🔄 Reset All", use_container_width=True, key="reset_all_btn"):
             reset_all_state()
             st.rerun()
 
@@ -630,7 +693,6 @@ if st.session_state.show_preview_modal and st.session_state.resume_loaded:
     file_name = st.session_state.raw_file_name
     file_bytes = st.session_state.raw_file_bytes
     
-    # Header with close button
     header_col1, header_col2 = st.columns([8, 2])
     with header_col1:
         st.markdown(f"""
@@ -650,12 +712,9 @@ if st.session_state.show_preview_modal and st.session_state.resume_loaded:
             st.session_state.show_preview_modal = False
             st.rerun()
     
-    # Preview content
     st.markdown('<div class="preview-body">', unsafe_allow_html=True)
     
-    # Render based on file type
     if file_type in [".jpg", ".jpeg", ".png", ".webp"]:
-        # IMAGE PREVIEW
         st.markdown('<div class="preview-image-container">', unsafe_allow_html=True)
         b64_img = base64.b64encode(file_bytes).decode()
         mime_type = f"image/{file_type.replace('.', '')}"
@@ -668,7 +727,6 @@ if st.session_state.show_preview_modal and st.session_state.resume_loaded:
         st.markdown('</div>', unsafe_allow_html=True)
         
     elif file_type == ".pdf":
-        # PDF PREVIEW - Show extracted text (full content)
         st.markdown("**📑 PDF Content (Full Text)**")
         st.markdown(
             f'<div class="preview-text-content">{st.session_state.resume_text}</div>',
@@ -676,7 +734,6 @@ if st.session_state.show_preview_modal and st.session_state.resume_loaded:
         )
         
     elif file_type in [".docx", ".doc"]:
-        # DOCX PREVIEW - Show full extracted text
         st.markdown("**📘 Document Content (Full Text)**")
         st.markdown(
             f'<div class="preview-text-content">{st.session_state.resume_text}</div>',
@@ -684,7 +741,6 @@ if st.session_state.show_preview_modal and st.session_state.resume_loaded:
         )
         
     elif file_type in [".txt", ".text", ".md"]:
-        # TEXT PREVIEW - Show full content
         st.markdown("**📝 Text Content (Full)**")
         st.markdown(
             f'<div class="preview-text-content">{st.session_state.resume_text}</div>',
@@ -692,7 +748,6 @@ if st.session_state.show_preview_modal and st.session_state.resume_loaded:
         )
         
     else:
-        # FALLBACK - Show extracted text
         st.markdown("**📄 Extracted Content**")
         st.markdown(
             f'<div class="preview-text-content">{st.session_state.resume_text}</div>',
@@ -701,7 +756,6 @@ if st.session_state.show_preview_modal and st.session_state.resume_loaded:
     
     st.markdown('</div>', unsafe_allow_html=True)
     
-    # Footer with actions
     st.markdown("---")
     footer_col1, footer_col2, footer_col3 = st.columns([3, 3, 3])
     
@@ -712,7 +766,6 @@ if st.session_state.show_preview_modal and st.session_state.resume_loaded:
         st.caption(f"📊 **Size:** {fi['file_size_kb']} KB | **Type:** {file_type.upper()}")
     
     with footer_col3:
-        # Download button
         st.download_button(
             label="📥 Download Original",
             data=file_bytes,
@@ -723,14 +776,12 @@ if st.session_state.show_preview_modal and st.session_state.resume_loaded:
     
     st.markdown("<br>", unsafe_allow_html=True)
     
-    # Back to chat button
     col_back1, col_back2, col_back3 = st.columns([1, 2, 1])
     with col_back2:
         if st.button("⬅️ Back to Chat", key="back_to_chat_btn", use_container_width=True):
             st.session_state.show_preview_modal = False
             st.rerun()
     
-    # Stop here - don't render chat
     st.stop()
 
 
@@ -757,14 +808,12 @@ with col_b:
         </span>
     </div>""", unsafe_allow_html=True)
 
-# API key check
 if not GROQ_API_KEY:
     st.warning("⚠️ Add `GROQ_API_KEY` in Settings → Secrets")
     st.info("🔗 Free: [console.groq.com/keys](https://console.groq.com/keys)")
     st.stop()
 
 
-# ── Agent Trace Display (HIGH CONTRAST) ──
 def show_trace(steps, tools_used):
     with st.expander(
         f"🔍 Agent Trace ({len(steps)} steps · Tools: {', '.join(tools_used)})",
@@ -800,7 +849,6 @@ def show_trace(steps, tools_used):
             """, unsafe_allow_html=True)
 
 
-# ── Welcome Screen ──
 if not st.session_state.resume_loaded:
     st.markdown("""
     <div class="welcome-box">
@@ -816,7 +864,7 @@ if not st.session_state.resume_loaded:
             <li>🖼️ <strong>Images</strong> — JPG, PNG, WEBP (AI Vision OCR)</li>
         </ul>
         <br>
-        <p><strong>🔧 6 MCP Tools + Optional JD Matching:</strong></p>
+        <p><strong>🔧 7 MCP Tools + Optional JD Matching:</strong></p>
         <ul>
             <li>📄 Resume Search — RAG semantic search</li>
             <li>📊 Skill Analyzer — Match skills vs requirements</li>
@@ -824,7 +872,7 @@ if not st.session_state.resume_loaded:
             <li>📝 Cover Letter Generator — Tailored cover letters</li>
             <li>👤 Profile Summary — LinkedIn / portfolio bios</li>
             <li>🎯 JD Matcher — Resume vs Job Description scoring</li>
-            <li>🎓 Education Extractor — Education & degrees</li>
+            <li>🎓 Education Extractor — Degrees, GPA, certifications</li>
         </ul>
         <br>
         <p><em>👈 Upload a resume using the sidebar!</em></p>
@@ -833,7 +881,6 @@ if not st.session_state.resume_loaded:
     st.stop()
 
 
-# ── Display Chat History ──
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
@@ -862,7 +909,6 @@ for msg in st.session_state.messages:
                 show_trace(msg["steps"], msg.get("tools_used", []))
 
 
-# ── Agent Runner ──
 def run_agent(question: str):
     mi = GROQ_MODELS[st.session_state.selected_model]
     jd = st.session_state.jd_text if st.session_state.jd_loaded else ""
@@ -872,7 +918,6 @@ def run_agent(question: str):
     return agent.run(question, st.session_state.messages), mi
 
 
-# ── Handle Sidebar Suggestion ──
 if "pending_question" in st.session_state:
     q = st.session_state.pending_question
     del st.session_state.pending_question
@@ -890,7 +935,6 @@ if "pending_question" in st.session_state:
     st.rerun()
 
 
-# ── Chat Input ──
 if prompt := st.chat_input("Ask anything about the uploaded resume..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
 
@@ -928,7 +972,6 @@ if prompt := st.chat_input("Ask anything about the uploaded resume..."):
     })
 
 
-# ── Footer ──
 st.markdown("---")
 st.markdown(
     '<p class="app-footer">'
@@ -938,4 +981,3 @@ st.markdown(
     '</p>',
     unsafe_allow_html=True
 )
-
