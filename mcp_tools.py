@@ -1,14 +1,14 @@
 """
-Universal MCP Tool Server - Enhanced V2
+Universal MCP Tool Server - V3
+STRICT: No hallucination, only original data, no duplicates
 7 tools including Education Extractor
-Better section detection, education extraction, experience calculation
 Experience calculated with CURRENT_YEAR = 2026
 """
 
 import json
 import time
 import re
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Set
 from dataclasses import dataclass, field
 
 import chromadb
@@ -60,13 +60,25 @@ class MCPTool:
         }
 
 
+def _deduplicate_list(items: List[str]) -> List[str]:
+    """Remove duplicates while preserving order"""
+    seen: Set[str] = set()
+    result = []
+    for item in items:
+        item_lower = item.lower().strip()
+        if item_lower and item_lower not in seen:
+            seen.add(item_lower)
+            result.append(item.strip())
+    return result
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #              TOOL 1: RESUME SEARCH (ENHANCED RAG)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class ResumeSearchTool(MCPTool):
     name = "resume_search"
-    description = "Semantic search through uploaded resume. Use for any question about resume content including education, skills, experience, contact, certifications, projects."
+    description = "Semantic search through uploaded resume. Returns ONLY original content from the resume. Use for any question about resume content."
     parameters = [
         ToolParameter("query", "string", "Search query - be specific"),
         ToolParameter("num_results", "integer", "Number of results", False, 5)
@@ -82,48 +94,34 @@ class ResumeSearchTool(MCPTool):
         upper = text.upper()
         
         section_patterns = [
-            # Education - comprehensive patterns
             (["EDUCATION", "ACADEMIC", "QUALIFICATION", "DEGREE", "UNIVERSITY",
               "COLLEGE", "BACHELOR", "MASTER", "MBA", "PHD", "DIPLOMA", "SCHOOL",
               "B.TECH", "B.E.", "B.SC", "M.TECH", "M.E.", "M.SC", "B.A.", "M.A.",
               "BTECH", "MTECH", "BSC", "MSC", "GRADUATE", "POST GRADUATE", "POSTGRADUATE",
-              "CGPA", "GPA", "PERCENTAGE", "CLASS OF", "GRADUATED", "ALUMNUS",
-              "BACHELOR OF", "MASTER OF", "DOCTOR OF", "B.COM", "M.COM", "BBA", "BCA", "MCA",
-              "ENGINEERING", "COMPUTER SCIENCE", "INFORMATION TECHNOLOGY"], "Education"),
+              "CGPA", "GPA", "PERCENTAGE", "CLASS OF", "GRADUATED", "ALUMNUS"], "Education"),
             
-            # Experience
             (["EXPERIENCE", "EMPLOYMENT", "WORK HISTORY", "PROFESSIONAL EXPERIENCE",
-              "CAREER", "WORK EXPERIENCE", "JOB HISTORY", "POSITIONS HELD",
-              "PROFESSIONAL BACKGROUND", "CAREER HISTORY"], "Work Experience"),
+              "CAREER", "WORK EXPERIENCE", "JOB HISTORY", "POSITIONS HELD"], "Work Experience"),
             
-            # Skills
             (["SKILL", "TECHNICAL SKILL", "COMPETENC", "TECHNOLOGIES", "TOOLS",
               "PROGRAMMING", "LANGUAGES", "FRAMEWORKS", "EXPERTISE", "PROFICIENC",
               "TECH STACK", "CORE COMPETENCIES"], "Skills"),
             
-            # Certifications
             (["CERTIF", "LICENS", "CREDENTIAL", "ACCREDITATION", "TRAINING",
               "PROFESSIONAL DEVELOPMENT", "COURSES"], "Certifications"),
             
-            # Projects
             (["PROJECT", "PORTFOLIO", "PERSONAL PROJECT", "ACADEMIC PROJECT",
               "KEY PROJECTS", "NOTABLE PROJECTS"], "Projects"),
             
-            # Contact
             (["CONTACT", "EMAIL", "PHONE", "ADDRESS", "LINKEDIN", "GITHUB",
               "PORTFOLIO", "WEBSITE", "MOBILE", "REACH ME"], "Contact"),
             
-            # Summary
             (["SUMMARY", "PROFILE", "OBJECTIVE", "ABOUT ME", "PROFESSIONAL SUMMARY",
               "CAREER OBJECTIVE", "OVERVIEW", "INTRODUCTION"], "Summary"),
             
-            # Awards
-            (["AWARD", "HONOR", "ACHIEV", "RECOGNITION", "ACCOMPLISHMENT",
-              "ACCOLADE"], "Awards"),
+            (["AWARD", "HONOR", "ACHIEV", "RECOGNITION", "ACCOMPLISHMENT"], "Awards"),
             
-            # Publications
-            (["PUBLICATION", "RESEARCH", "PAPER", "JOURNAL", "CONFERENCE",
-              "THESIS", "DISSERTATION"], "Publications"),
+            (["PUBLICATION", "RESEARCH", "PAPER", "JOURNAL", "CONFERENCE"], "Publications"),
         ]
         
         for keywords, section in section_patterns:
@@ -143,7 +141,6 @@ class ResumeSearchTool(MCPTool):
         for line in lines:
             detected = self._detect_section(line)
             
-            # If short line matches a section, it's likely a header
             if len(line.strip()) < 60 and detected != "General":
                 if current_content:
                     if current_section not in sections:
@@ -167,7 +164,6 @@ class ResumeSearchTool(MCPTool):
         self._full_text = resume_text
         self._section_chunks = self._extract_sections(resume_text)
         
-        # Create chunks with better settings
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=400,
             chunk_overlap=150,
@@ -176,7 +172,6 @@ class ResumeSearchTool(MCPTool):
         )
         chunks = splitter.split_text(resume_text)
         
-        # Also create section-aware chunks
         section_aware_chunks = []
         for section, content in self._section_chunks.items():
             if content.strip():
@@ -188,7 +183,6 @@ class ResumeSearchTool(MCPTool):
                 for chunk in section_splitter.split_text(content):
                     section_aware_chunks.append((chunk, section))
         
-        # Initialize ChromaDB
         client = chromadb.Client()
         ef = embedding_functions.DefaultEmbeddingFunction()
         
@@ -205,14 +199,12 @@ class ResumeSearchTool(MCPTool):
 
         ids, docs, metas = [], [], []
         
-        # Add regular chunks
         for i, chunk in enumerate(chunks):
             section = self._detect_section(chunk)
             ids.append(f"chunk_{i}")
             docs.append(chunk)
             metas.append({"section": section, "type": "regular"})
         
-        # Add section-aware chunks
         for i, (chunk, section) in enumerate(section_aware_chunks):
             ids.append(f"section_{i}")
             docs.append(chunk)
@@ -230,15 +222,12 @@ class ResumeSearchTool(MCPTool):
             return ToolResult(self.name, False, None, error="Resume not loaded")
 
         try:
-            # Check if query is asking for a specific section
             query_section = self._detect_section(query)
             
-            # Get section content if available
             section_content = ""
             if query_section != "General" and query_section in self._section_chunks:
                 section_content = self._section_chunks[query_section]
             
-            # Perform semantic search
             results = self._collection.query(
                 query_texts=[query],
                 n_results=min(k + 3, self._collection.count()),
@@ -250,7 +239,7 @@ class ResumeSearchTool(MCPTool):
             
             if results and results["documents"]:
                 for i, doc in enumerate(results["documents"][0]):
-                    doc_key = doc[:80].strip()
+                    doc_key = doc[:80].strip().lower()
                     if doc_key in seen_content:
                         continue
                     seen_content.add(doc_key)
@@ -259,7 +248,6 @@ class ResumeSearchTool(MCPTool):
                     dist = results["distances"][0][i] if results["distances"] else 0
                     relevance = round(max(0, 1 - dist), 3)
                     
-                    # Boost section-matched results
                     if query_section != "General" and meta.get("section") == query_section:
                         relevance = min(1.0, relevance + 0.2)
                     
@@ -272,7 +260,6 @@ class ResumeSearchTool(MCPTool):
             retrieved.sort(key=lambda x: x["relevance"], reverse=True)
             retrieved = retrieved[:k]
             
-            # Build context
             context_parts = []
             if section_content:
                 context_parts.append(f"=== {query_section} Section ===\n{section_content}")
@@ -289,7 +276,8 @@ class ResumeSearchTool(MCPTool):
                     "query": query,
                     "results": retrieved,
                     "section_content": section_content,
-                    "context": context
+                    "context": context,
+                    "note": "All content retrieved directly from uploaded resume - no generated content"
                 },
                 metadata={"count": len(retrieved), "section_found": query_section},
                 execution_time=round(time.time() - start, 3)
@@ -304,15 +292,15 @@ class ResumeSearchTool(MCPTool):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#              TOOL 2: SKILL ANALYZER (ENHANCED)
+#              TOOL 2: SKILL ANALYZER (NO HALLUCINATION)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class SkillAnalyzerTool(MCPTool):
     name = "skill_analyzer"
-    description = "Analyze skill match between resume and job requirements with gap analysis."
+    description = "Extract and list ALL skills from resume. Only compares against required_skills if explicitly provided. Returns ONLY skills found in the resume."
     parameters = [
         ToolParameter("required_skills", "string",
-                      "Comma-separated skills or job description text")
+                      "Comma-separated skills to match (ONLY if JD uploaded or user provides skills)", False, "")
     ]
 
     def __init__(self):
@@ -350,82 +338,128 @@ class SkillAnalyzerTool(MCPTool):
     def execute(self, **kwargs) -> ToolResult:
         start = time.time()
         try:
-            req_input = kwargs.get("required_skills", "")
-            required = [s.strip().lower() for s in req_input.replace("\n", ",").split(",") if s.strip()]
-
+            req_input = kwargs.get("required_skills", "").strip()
+            
             # Get skills from parsed resume
             all_skills = []
             skills_data = self._parsed.get("skills", {})
             if isinstance(skills_data, dict):
                 for cat in skills_data.values():
                     if isinstance(cat, list):
-                        all_skills.extend(s.lower() for s in cat)
+                        all_skills.extend(cat)
             elif isinstance(skills_data, list):
-                all_skills.extend(s.lower() for s in skills_data)
+                all_skills.extend(skills_data)
             
-            all_skills.extend(s.lower() for s in self._parsed.get("specializations", []))
+            all_skills.extend(self._parsed.get("specializations", []))
 
             # Extract from work history
             work_history = self._parsed.get("work_history", self._parsed.get("experience", []))
             if isinstance(work_history, list):
                 for job in work_history:
                     if isinstance(job, dict):
-                        for ach in job.get("key_achievements", job.get("highlights", [])):
-                            if isinstance(ach, str):
-                                all_skills.append(ach.lower())
                         for tech in job.get("technologies_used", job.get("technologies", [])):
                             if isinstance(tech, str):
-                                all_skills.append(tech.lower())
+                                all_skills.append(tech)
 
             # Also extract from raw text
             if self._resume_text:
                 text_skills = self._extract_skills_from_text(self._resume_text)
-                all_skills.extend([s.lower() for s in text_skills])
+                all_skills.extend(text_skills)
 
-            matched, partial, missing = [], [], []
-            related = {
-                "machine learning": ["ml", "scikit-learn", "tensorflow", "keras", "pytorch"],
-                "deep learning": ["tensorflow", "keras", "pytorch", "neural", "cnn", "rnn"],
-                "nlp": ["natural language", "ner", "bert", "text", "spacy", "transformers"],
-                "cloud": ["aws", "gcp", "azure", "cloud computing"],
-                "api": ["rest api", "django", "flask", "fastapi"],
-                "llm": ["large language", "generative ai", "gpt", "transformer", "langchain"],
-                "docker": ["container", "kubernetes", "k8s", "devops"],
-                "python": ["python", "django", "flask", "pandas", "numpy"],
-                "sql": ["mysql", "postgresql", "database", "mongodb"],
-                "javascript": ["js", "react", "node", "angular", "vue", "typescript"],
-                "java": ["java", "spring", "jvm", "maven"],
+            # Deduplicate skills
+            all_skills = _deduplicate_list(all_skills)
+
+            # Categorize skills
+            categorized_skills = {
+                "programming_languages": [],
+                "frameworks_libraries": [],
+                "cloud_devops": [],
+                "databases": [],
+                "ai_ml": [],
+                "tools_platforms": [],
+                "other": []
+            }
+            
+            for skill in all_skills:
+                skill_lower = skill.lower()
+                if any(x in skill_lower for x in ['python', 'java', 'c++', 'c#', 'ruby', 'go', 'rust', 'swift', 'kotlin', 'php', 'scala', 'r', 'matlab', 'javascript', 'typescript']):
+                    categorized_skills["programming_languages"].append(skill)
+                elif any(x in skill_lower for x in ['react', 'angular', 'vue', 'node', 'express', 'django', 'flask', 'spring', 'laravel', 'next', 'fastapi']):
+                    categorized_skills["frameworks_libraries"].append(skill)
+                elif any(x in skill_lower for x in ['aws', 'azure', 'gcp', 'docker', 'kubernetes', 'k8s', 'terraform', 'jenkins', 'ci/cd', 'devops']):
+                    categorized_skills["cloud_devops"].append(skill)
+                elif any(x in skill_lower for x in ['sql', 'mysql', 'postgres', 'mongodb', 'redis', 'elasticsearch', 'dynamodb', 'oracle', 'cassandra']):
+                    categorized_skills["databases"].append(skill)
+                elif any(x in skill_lower for x in ['tensorflow', 'pytorch', 'keras', 'scikit', 'pandas', 'numpy', 'opencv', 'nlp', 'ml', 'ai', 'machine learning', 'deep learning']):
+                    categorized_skills["ai_ml"].append(skill)
+                elif any(x in skill_lower for x in ['git', 'jira', 'confluence', 'agile', 'scrum', 'linux', 'unix', 'power bi', 'tableau']):
+                    categorized_skills["tools_platforms"].append(skill)
+                else:
+                    categorized_skills["other"].append(skill)
+            
+            # Deduplicate each category
+            for cat in categorized_skills:
+                categorized_skills[cat] = _deduplicate_list(categorized_skills[cat])
+
+            result_data = {
+                "candidate_name": self._parsed.get("name", ""),
+                "total_skills_found": len(all_skills),
+                "all_skills": all_skills,
+                "skills_by_category": categorized_skills,
+                "note": "All skills extracted directly from resume - no generated content"
             }
 
-            for req in required:
-                if not req:
-                    continue
-                if any(req in s or s in req for s in all_skills):
-                    matched.append(req)
-                else:
-                    found = False
-                    for key, aliases in related.items():
-                        check = aliases + [key]
-                        if any(req in a or a in req for a in check):
-                            if any(any(a in s or s in a for a in check) for s in all_skills):
-                                partial.append(req)
-                                found = True
-                                break
-                    if not found:
-                        missing.append(req)
+            # ONLY do comparison if required_skills is provided
+            if req_input:
+                required = [s.strip().lower() for s in req_input.replace("\n", ",").split(",") if s.strip()]
+                
+                matched, partial, missing = [], [], []
+                related = {
+                    "machine learning": ["ml", "scikit-learn", "tensorflow", "keras", "pytorch"],
+                    "deep learning": ["tensorflow", "keras", "pytorch", "neural", "cnn", "rnn"],
+                    "nlp": ["natural language", "ner", "bert", "text", "spacy", "transformers"],
+                    "cloud": ["aws", "gcp", "azure"],
+                    "docker": ["container", "kubernetes", "k8s"],
+                    "python": ["django", "flask", "pandas", "numpy"],
+                    "sql": ["mysql", "postgresql", "database", "mongodb"],
+                    "javascript": ["js", "react", "node", "angular", "vue", "typescript"],
+                }
+                
+                all_skills_lower = [s.lower() for s in all_skills]
 
-            total = max(len(required), 1)
-            pct = round(((len(matched) + len(partial) * 0.5) / total) * 100, 1)
+                for req in required:
+                    if not req:
+                        continue
+                    if any(req in s or s in req for s in all_skills_lower):
+                        matched.append(req)
+                    else:
+                        found = False
+                        for key, aliases in related.items():
+                            check = aliases + [key]
+                            if any(req in a or a in req for a in check):
+                                if any(any(a in s or s in a for a in check) for s in all_skills_lower):
+                                    partial.append(req)
+                                    found = True
+                                    break
+                        if not found:
+                            missing.append(req)
 
-            return ToolResult(self.name, True, {
-                "match_percentage": pct,
-                "matched_skills": matched,
-                "partial_matches": partial,
-                "missing_skills": missing,
-                "total_required": len(required),
-                "candidate_name": self._parsed.get("name", ""),
-                "all_detected_skills": list(set(all_skills))[:30]
-            }, execution_time=round(time.time() - start, 3))
+                total = max(len(required), 1)
+                pct = round(((len(matched) + len(partial) * 0.5) / total) * 100, 1)
+
+                result_data["skill_comparison"] = {
+                    "match_percentage": pct,
+                    "matched_skills": _deduplicate_list(matched),
+                    "partial_matches": _deduplicate_list(partial),
+                    "missing_skills": _deduplicate_list(missing),
+                    "total_required": len(required),
+                }
+            else:
+                result_data["skill_comparison"] = None
+                result_data["info"] = "No required skills provided for comparison. Showing all skills found in resume."
+
+            return ToolResult(self.name, True, result_data, 
+                            execution_time=round(time.time() - start, 3))
         except Exception as e:
             return ToolResult(self.name, False, None, error=str(e),
                             execution_time=round(time.time() - start, 3))
@@ -437,7 +471,7 @@ class SkillAnalyzerTool(MCPTool):
 
 class ExperienceCalculatorTool(MCPTool):
     name = "experience_calculator"
-    description = f"Calculate experience breakdown by years, roles, timeline. Current year: {CURRENT_YEAR}."
+    description = f"Calculate experience breakdown from resume. Returns ONLY data from the resume. Current year: {CURRENT_YEAR}."
     parameters = [
         ToolParameter("category", "string", "total, timeline, or all", False, "all")
     ]
@@ -451,7 +485,6 @@ class ExperienceCalculatorTool(MCPTool):
     def execute(self, **kwargs) -> ToolResult:
         start = time.time()
         try:
-            # Try both work_history and experience keys
             work = self._parsed.get("work_history", self._parsed.get("experience", []))
             if not isinstance(work, list):
                 work = []
@@ -459,23 +492,38 @@ class ExperienceCalculatorTool(MCPTool):
             total = self._parsed.get("total_experience_years", 0)
 
             timeline = []
+            seen_jobs = set()
+            
             for j in work:
                 if not isinstance(j, dict):
                     continue
-                    
+                
+                role = j.get("title", j.get("role", j.get("position", "")))
+                company = j.get("company", j.get("organization", ""))
+                
+                # Deduplicate jobs
+                job_key = f"{role}_{company}".lower()
+                if job_key in seen_jobs:
+                    continue
+                seen_jobs.add(job_key)
+                
                 start_d = j.get("start_date", j.get("from", ""))
                 end_d = j.get("end_date", j.get("to", ""))
                 duration = j.get("duration", "")
                 if not duration and start_d:
                     duration = f"{start_d} - {end_d}"
 
+                achievements = j.get("key_achievements", j.get("highlights", j.get("responsibilities", [])))
+                if isinstance(achievements, list):
+                    achievements = _deduplicate_list(achievements)[:5]
+
                 timeline.append({
-                    "role": j.get("title", j.get("role", j.get("position", ""))),
-                    "company": j.get("company", j.get("organization", "")),
+                    "role": role,
+                    "company": company,
                     "duration": duration,
                     "years": j.get("duration_years", j.get("years", 0)),
-                    "type": j.get("type", ""),
-                    "achievements": j.get("key_achievements", j.get("highlights", j.get("responsibilities", [])))[:5]
+                    "type": j.get("type", "Full-time"),
+                    "achievements": achievements
                 })
 
             return ToolResult(self.name, True, {
@@ -486,6 +534,7 @@ class ExperienceCalculatorTool(MCPTool):
                 "current_role": self._parsed.get("current_role", ""),
                 "current_company": self._parsed.get("current_company", ""),
                 "timeline": timeline,
+                "note": "All experience data extracted directly from resume"
             }, execution_time=round(time.time() - start, 3))
         except Exception as e:
             return ToolResult(self.name, False, None, error=str(e),
@@ -498,7 +547,7 @@ class ExperienceCalculatorTool(MCPTool):
 
 class CoverLetterTool(MCPTool):
     name = "cover_letter_generator"
-    description = "Generate data for a tailored cover letter for a specific role/company."
+    description = "Generate cover letter data using ONLY information from the resume. No fabricated achievements."
     parameters = [
         ToolParameter("job_title", "string", "Target job title"),
         ToolParameter("company_name", "string", "Target company", False, "the company")
@@ -522,6 +571,19 @@ class CoverLetterTool(MCPTool):
                         achs = w.get("key_achievements", w.get("highlights", w.get("responsibilities", [])))
                         if isinstance(achs, list):
                             achievements.extend(achs[:3])
+            
+            achievements = _deduplicate_list(achievements)
+
+            # Get skills without duplicates
+            all_skills = []
+            skills_data = r.get("skills", {})
+            if isinstance(skills_data, dict):
+                for cat in skills_data.values():
+                    if isinstance(cat, list):
+                        all_skills.extend(cat)
+            elif isinstance(skills_data, list):
+                all_skills = skills_data
+            all_skills = _deduplicate_list(all_skills)
 
             return ToolResult(self.name, True, {
                 "candidate_name": r.get("name", ""),
@@ -530,14 +592,15 @@ class CoverLetterTool(MCPTool):
                 "experience_years": r.get("total_experience_years", 0),
                 "current_role": r.get("current_role", ""),
                 "current_company": r.get("current_company", ""),
-                "key_skills": r.get("specializations", []),
-                "achievements": achievements,
+                "key_skills": all_skills[:10],
+                "achievements": achievements[:5],
                 "education": r.get("education", []),
                 "certifications_count": len(r.get("certifications", [])),
                 "contact": {
                     "email": r.get("email", ""),
                     "phone": r.get("phone", ""),
                 },
+                "note": "All data extracted from resume - use this information to write cover letter"
             }, execution_time=round(time.time() - start, 3))
         except Exception as e:
             return ToolResult(self.name, False, None, error=str(e),
@@ -550,7 +613,7 @@ class CoverLetterTool(MCPTool):
 
 class ProfileSummaryTool(MCPTool):
     name = "profile_summary"
-    description = "Generate professional summary/bio for different contexts (linkedin, portfolio, elevator_pitch)."
+    description = "Extract profile summary and contact info. Returns ONLY data from the resume."
     parameters = [
         ToolParameter("context", "string",
                       "Context: linkedin, portfolio, elevator_pitch, detailed", False, "detailed")
@@ -571,9 +634,26 @@ class ProfileSummaryTool(MCPTool):
             if isinstance(skills_data, dict):
                 for cat in skills_data.values():
                     if isinstance(cat, list):
-                        all_skills.extend(cat[:5])
+                        all_skills.extend(cat)
             elif isinstance(skills_data, list):
-                all_skills = skills_data[:15]
+                all_skills = skills_data
+            
+            all_skills = _deduplicate_list(all_skills)
+
+            # Deduplicate certifications
+            certs = r.get("certifications", [])
+            if isinstance(certs, list):
+                seen_certs = set()
+                unique_certs = []
+                for cert in certs:
+                    if isinstance(cert, dict):
+                        cert_name = cert.get("name", "").lower()
+                    else:
+                        cert_name = str(cert).lower()
+                    if cert_name and cert_name not in seen_certs:
+                        seen_certs.add(cert_name)
+                        unique_certs.append(cert)
+                certs = unique_certs[:5]
 
             return ToolResult(self.name, True, {
                 "name": r.get("name", ""),
@@ -582,10 +662,10 @@ class ProfileSummaryTool(MCPTool):
                 "current_role": r.get("current_role", ""),
                 "current_company": r.get("current_company", ""),
                 "summary": r.get("professional_summary", r.get("summary", "")),
-                "specializations": r.get("specializations", []),
+                "specializations": _deduplicate_list(r.get("specializations", [])),
                 "top_skills": all_skills[:12],
                 "education": r.get("education", []),
-                "certifications": r.get("certifications", [])[:5],
+                "certifications": certs,
                 "awards": r.get("awards", []),
                 "contact": {
                     "email": r.get("email", ""),
@@ -593,7 +673,9 @@ class ProfileSummaryTool(MCPTool):
                     "address": r.get("address", r.get("location", "")),
                     "linkedin": r.get("linkedin", ""),
                     "github": r.get("github", ""),
-                }
+                    "portfolio": r.get("portfolio", ""),
+                },
+                "note": "All data extracted directly from resume"
             }, execution_time=round(time.time() - start, 3))
         except Exception as e:
             return ToolResult(self.name, False, None, error=str(e),
@@ -601,14 +683,14 @@ class ProfileSummaryTool(MCPTool):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#              TOOL 6: JD MATCHER
+#              TOOL 6: JD MATCHER (REQUIRES JD)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class JDMatcherTool(MCPTool):
     name = "jd_matcher"
-    description = "Compare resume against a Job Description. Provides fit score and detailed analysis."
+    description = "Compare resume against a Job Description. REQUIRES JD to be uploaded. Do NOT use without JD."
     parameters = [
-        ToolParameter("jd_text", "string", "Job description text to compare against")
+        ToolParameter("jd_text", "string", "Job description text - REQUIRED for comparison")
     ]
 
     def __init__(self):
@@ -619,15 +701,19 @@ class JDMatcherTool(MCPTool):
 
     def execute(self, **kwargs) -> ToolResult:
         start = time.time()
-        jd = kwargs.get("jd_text", "").lower()
+        jd = kwargs.get("jd_text", "").strip()
 
-        if not jd or len(jd.strip()) < 20:
+        # STRICT: Require JD
+        if not jd or len(jd) < 50:
             return ToolResult(self.name, False, None,
-                            error="No job description provided or too short")
+                            error="Job Description is required for comparison. Please upload a JD first.",
+                            execution_time=round(time.time() - start, 3))
+        
         try:
+            jd_lower = jd.lower()
             r = self._parsed
 
-            # All candidate skills flattened
+            # Get candidate skills (deduplicated)
             all_skills = []
             skills_data = r.get("skills", {})
             if isinstance(skills_data, dict):
@@ -638,18 +724,20 @@ class JDMatcherTool(MCPTool):
                 all_skills.extend(s.lower() for s in skills_data)
             
             all_skills.extend(s.lower() for s in r.get("specializations", []))
+            all_skills = list(set(all_skills))  # Deduplicate
 
-            # Skills found in JD
-            skill_hits = [s for s in set(all_skills) if any(w in jd for w in s.split())]
-            skill_score = min(100, (len(skill_hits) / max(len(set(all_skills)), 1)) * 150)
+            # Find skills mentioned in JD
+            skill_hits = [s for s in all_skills if any(w in jd_lower for w in s.split())]
+            skill_hits = _deduplicate_list(skill_hits)
+            skill_score = min(100, (len(skill_hits) / max(len(all_skills), 1)) * 150)
 
             # Experience comparison
             exp = r.get("total_experience_years", 0)
-            exp_matches = re.findall(r'(\d+)\+?\s*years?', jd)
+            exp_matches = re.findall(r'(\d+)\+?\s*years?', jd_lower)
             exp_required = max([int(x) for x in exp_matches]) if exp_matches else 3
             exp_score = min(100, (exp / max(exp_required, 1)) * 100)
 
-            # Education
+            # Education check
             edu = r.get("education", [])
             edu_keywords = ["bachelor", "master", "phd", "b.tech", "m.tech", "mba",
                            "b.sc", "m.sc", "degree", "b.e", "m.e", "bca", "mca"]
@@ -657,7 +745,7 @@ class JDMatcherTool(MCPTool):
                 any(k in json.dumps(e).lower() for k in edu_keywords)
                 for e in edu if isinstance(e, dict)
             ) if edu else False
-            jd_needs_edu = any(k in jd for k in edu_keywords)
+            jd_needs_edu = any(k in jd_lower for k in edu_keywords)
             edu_score = 90 if edu_in_resume else (60 if not jd_needs_edu else 30)
 
             # Certifications
@@ -673,7 +761,7 @@ class JDMatcherTool(MCPTool):
                         resume_blob += " " + " ".join(job.get("key_achievements", job.get("highlights", []))).lower()
                         resume_blob += " " + " ".join(job.get("technologies_used", job.get("technologies", []))).lower()
             
-            jd_words = [w for w in set(re.findall(r'\b\w+\b', jd)) if len(w) > 4 and w.isalpha()]
+            jd_words = [w for w in set(re.findall(r'\b\w+\b', jd_lower)) if len(w) > 4 and w.isalpha()]
             kw_hits = sum(1 for w in jd_words if w in resume_blob)
             kw_score = min(100, (kw_hits / max(len(jd_words), 1)) * 200)
 
@@ -688,25 +776,25 @@ class JDMatcherTool(MCPTool):
             if skill_score >= 60:
                 strengths.append(f"Strong skill alignment ({skill_score:.0f}%)")
             if exp_score >= 80:
-                strengths.append("Experience meets/exceeds requirements")
+                strengths.append(f"Experience meets requirements ({exp}y vs {exp_required}y required)")
             if cert_score >= 50:
-                strengths.append("Relevant certifications present")
+                strengths.append(f"Has {len(certs)} relevant certifications")
             if kw_score >= 50:
                 strengths.append("Good keyword match with JD")
 
             if skill_score < 40:
-                gaps.append("Significant skill gaps detected")
+                gaps.append("Skill gaps detected - review required skills")
             if exp_score < 60:
-                gaps.append(f"Experience gap ({exp}y vs {exp_required}y needed)")
+                gaps.append(f"Experience gap ({exp}y vs {exp_required}y required)")
             if not edu_in_resume and jd_needs_edu:
-                gaps.append("Education qualification mismatch")
+                gaps.append("Education qualification may not match")
             if kw_score < 30:
                 gaps.append("Low keyword overlap with JD")
 
             recommendation = (
                 "🟢 Strong fit — highly recommended" if overall >= 75 else
                 "🟡 Good fit with some gaps — worth considering" if overall >= 55 else
-                "🟠 Moderate fit — consider upskilling" if overall >= 35 else
+                "🟠 Moderate fit — may need upskilling" if overall >= 35 else
                 "🔴 Low fit for this specific role"
             )
 
@@ -720,14 +808,15 @@ class JDMatcherTool(MCPTool):
                     "certifications_match": round(cert_score, 1),
                     "keyword_match": round(kw_score, 1),
                 },
-                "matched_skills": list(set(skill_hits))[:15],
+                "matched_skills": skill_hits[:15],
                 "experience_comparison": {
                     "candidate_years": exp,
                     "jd_requirement_years": exp_required
                 },
-                "strengths": strengths,
-                "gaps": gaps,
-                "recommendation": recommendation
+                "strengths": _deduplicate_list(strengths),
+                "gaps": _deduplicate_list(gaps),
+                "recommendation": recommendation,
+                "note": "Comparison based on uploaded JD and resume data only"
             }, execution_time=round(time.time() - start, 3))
         except Exception as e:
             return ToolResult(self.name, False, None, error=str(e),
@@ -735,12 +824,12 @@ class JDMatcherTool(MCPTool):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#              TOOL 7: EDUCATION EXTRACTOR (NEW)
+#              TOOL 7: EDUCATION EXTRACTOR
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class EducationExtractorTool(MCPTool):
     name = "education_extractor"
-    description = "Extract and analyze education details including degrees, institutions, years, GPA, majors, and certifications."
+    description = "Extract education details from resume. Returns ONLY education information found in the resume."
     parameters = [
         ToolParameter("include_certifications", "boolean", "Include certifications", False, True)
     ]
@@ -759,85 +848,69 @@ class EducationExtractorTool(MCPTool):
         """Extract education directly from text using patterns"""
         education = []
         
-        # Degree patterns
         degree_patterns = [
-            (r'(Bachelor[\'s]?\s*(?:of\s*)?(?:Science|Arts|Engineering|Technology|Commerce|Business Administration)?)', 'Bachelor'),
-            (r'(B\.?(?:Tech|E|Sc|A|Com|B\.?A|S|CA|BA)\.?)\s*(?:in\s*)?([\w\s,]+)?', 'Bachelor'),
-            (r'(Master[\'s]?\s*(?:of\s*)?(?:Science|Arts|Engineering|Technology|Business Administration)?)', 'Master'),
-            (r'(M\.?(?:Tech|E|Sc|A|B\.?A|S|CA|BA)\.?|MBA)\s*(?:in\s*)?([\w\s,]+)?', 'Master'),
-            (r'(Ph\.?D\.?|Doctorate)\s*(?:in\s*)?([\w\s,]+)?', 'PhD'),
-            (r'(Diploma)\s*(?:in\s*)?([\w\s,]+)?', 'Diploma'),
-            (r'(High School|HSC|SSC|12th|10th|Secondary|Higher Secondary)', 'School'),
+            (r'(Bachelor[\'s]?\s*(?:of\s*)?(?:Science|Arts|Technology|Engineering|Commerce|Business Administration)?)', 'Bachelor'),
+            (r'(B\.?\s*(?:Tech|E|Sc|A|Com|B\.?A|S|CA|BA)\.?)', 'Bachelor'),
+            (r'(Master[\'s]?\s*(?:of\s*)?(?:Science|Arts|Technology|Engineering|Business Administration)?)', 'Master'),
+            (r'(M\.?\s*(?:Tech|E|Sc|A|B\.?A|S|CA|BA)\.?|MBA)', 'Master'),
+            (r'(Ph\.?\s*D\.?|Doctorate)', 'PhD'),
+            (r'(Diploma)', 'Diploma'),
+            (r'(Higher\s*Secondary|HSC|12th|XII|Intermediate)', 'School'),
+            (r'(Secondary|SSC|10th|X|Matriculation)', 'School'),
         ]
         
-        # GPA patterns
-        gpa_patterns = [
-            r'(?:GPA|CGPA|CPI)[:\s]*(\d+\.?\d*)\s*(?:/\s*(\d+\.?\d*))?',
-            r'(\d+\.?\d*)\s*(?:/\s*(\d+\.?\d*))?\s*(?:GPA|CGPA|CPI)',
-            r'(\d{1,2}(?:\.\d+)?)\s*%\s*(?:marks?|score)?',
-            r'(?:First\s*Class|Distinction|Honors?)',
-        ]
-        
-        # Institution patterns
         institution_patterns = [
-            r'([A-Z][A-Za-z\s\.]+(?:University|College|Institute|School|Academy|IIT|NIT|BITS|IIIT))',
-            r'(?:from|at)\s+([A-Z][A-Za-z\s\.]+)',
+            r'([A-Z][A-Za-z\s\.]+(?:University|College|Institute|School|Academy))',
+            r'((?:IIT|NIT|IIIT|BITS|VIT|SRM)\s*[\w\s]*)',
         ]
         
-        # Year patterns
+        gpa_patterns = [
+            r'(?:GPA|CGPA|CPI)[:\s]*(\d+\.?\d*)',
+            r'(\d{1,2}(?:\.\d+)?)\s*%',
+        ]
+        
         year_patterns = [
-            r'(19|20)\d{2}\s*[-–to]\s*(19|20)\d{2}',
-            r'(?:class of|graduated?|batch|year)[:\s]*(19|20)\d{2}',
-            r'(19|20)\d{2}',
+            r'((?:19|20)\d{2})\s*[-–to]+\s*((?:19|20)\d{2}|Present|Current)',
+            r'((?:19|20)\d{2})',
         ]
         
-        # Split text into potential education entries
-        lines = text.split('\n')
-        current_edu = {}
-        
-        for i, line in enumerate(lines):
-            line_stripped = line.strip()
-            if not line_stripped:
-                if current_edu and any(current_edu.values()):
-                    education.append(current_edu)
-                    current_edu = {}
-                continue
-            
-            # Check for degree
-            for pattern, degree_type in degree_patterns:
-                match = re.search(pattern, line, re.IGNORECASE)
-                if match:
-                    current_edu['degree'] = match.group(1).strip()
-                    current_edu['degree_type'] = degree_type
-                    if match.lastindex and match.lastindex >= 2 and match.group(2):
-                        current_edu['field'] = match.group(2).strip()
-                    break
-            
-            # Check for institution
-            for pattern in institution_patterns:
-                match = re.search(pattern, line)
-                if match:
-                    inst = match.group(1).strip()
-                    if len(inst) > 3 and inst not in ['The', 'And', 'For']:
-                        current_edu['institution'] = inst
-                    break
-            
-            # Check for year
-            for pattern in year_patterns:
-                match = re.search(pattern, line, re.IGNORECASE)
-                if match:
-                    current_edu['year'] = match.group(0)
-                    break
-            
-            # Check for GPA
-            for pattern in gpa_patterns:
-                match = re.search(pattern, line, re.IGNORECASE)
-                if match:
-                    current_edu['gpa'] = match.group(0)
-                    break
-        
-        if current_edu and any(current_edu.values()):
-            education.append(current_edu)
+        for pattern, degree_type in degree_patterns:
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                degree_name = match.group(1).strip()
+                
+                start = max(0, match.start() - 50)
+                end = min(len(text), match.end() + 200)
+                context = text[start:end]
+                
+                edu_entry = {
+                    "degree": degree_name,
+                    "degree_type": degree_type,
+                    "institution": "",
+                    "year": "",
+                    "gpa": "",
+                }
+                
+                for inst_pattern in institution_patterns:
+                    inst_match = re.search(inst_pattern, context)
+                    if inst_match:
+                        inst = inst_match.group(1).strip()
+                        if len(inst) > 5:
+                            edu_entry["institution"] = inst
+                            break
+                
+                for year_pattern in year_patterns:
+                    year_match = re.search(year_pattern, context, re.IGNORECASE)
+                    if year_match:
+                        edu_entry["year"] = year_match.group(0)
+                        break
+                
+                for gpa_pattern in gpa_patterns:
+                    gpa_match = re.search(gpa_pattern, context, re.IGNORECASE)
+                    if gpa_match:
+                        edu_entry["gpa"] = gpa_match.group(0)
+                        break
+                
+                education.append(edu_entry)
         
         return education
 
@@ -859,7 +932,7 @@ class EducationExtractorTool(MCPTool):
             if self._resume_text:
                 text_education = self._extract_education_from_text(self._resume_text)
             
-            # Merge and format
+            # Merge and deduplicate
             all_education = []
             seen = set()
             
@@ -870,8 +943,7 @@ class EducationExtractorTool(MCPTool):
                 degree = edu.get("degree", edu.get("title", ""))
                 institution = edu.get("institution", edu.get("university", edu.get("school", edu.get("college", ""))))
                 
-                # Skip duplicates
-                key = f"{degree}_{institution}".lower()[:50]
+                key = f"{degree}_{institution}".lower()[:60]
                 if key in seen or not (degree or institution):
                     continue
                 seen.add(key)
@@ -880,25 +952,36 @@ class EducationExtractorTool(MCPTool):
                     "degree": degree,
                     "field": edu.get("field", edu.get("major", edu.get("specialization", edu.get("branch", "")))),
                     "institution": institution,
-                    "year": edu.get("year", edu.get("graduation_year", edu.get("end_date", edu.get("passing_year", "")))),
+                    "year": edu.get("year", edu.get("graduation_year", edu.get("end_date", edu.get("end_year", "")))),
                     "gpa": edu.get("gpa", edu.get("cgpa", edu.get("grade", edu.get("percentage", "")))),
-                    "honors": edu.get("honors", edu.get("distinction", ""))
+                    "location": edu.get("location", "")
                 })
             
-            # Get certifications
+            # Get certifications (deduplicated)
             certifications = []
             if include_certs:
                 certs = self._parsed.get("certifications", [])
                 if isinstance(certs, list):
-                    certifications = certs
+                    seen_certs = set()
+                    for cert in certs:
+                        if isinstance(cert, dict):
+                            cert_name = cert.get("name", "").lower()
+                            if cert_name and cert_name not in seen_certs:
+                                seen_certs.add(cert_name)
+                                certifications.append(cert)
+                        elif isinstance(cert, str):
+                            cert_lower = cert.lower()
+                            if cert_lower and cert_lower not in seen_certs:
+                                seen_certs.add(cert_lower)
+                                certifications.append({"name": cert})
             
             # Determine highest degree
             degree_rank = {
-                "phd": 5, "doctorate": 5, "doctor": 5,
-                "master": 4, "mba": 4, "m.tech": 4, "mtech": 4, "m.e": 4, "m.sc": 4, "m.s": 4, "mca": 4,
-                "bachelor": 3, "b.tech": 3, "btech": 3, "b.e": 3, "b.sc": 3, "b.s": 3, "b.a": 3, "bca": 3, "b.com": 3,
+                "phd": 5, "doctorate": 5,
+                "master": 4, "mba": 4, "m.tech": 4, "mtech": 4, "m.e": 4, "m.sc": 4, "mca": 4,
+                "bachelor": 3, "b.tech": 3, "btech": 3, "b.e": 3, "b.sc": 3, "bca": 3, "b.com": 3,
                 "diploma": 2,
-                "high school": 1, "secondary": 1, "12th": 1, "hsc": 1, "10th": 1, "ssc": 1
+                "school": 1, "secondary": 1, "12th": 1, "hsc": 1
             }
             
             highest_degree = ""
@@ -918,7 +1001,8 @@ class EducationExtractorTool(MCPTool):
                     "total_qualifications": len(all_education),
                     "certifications": certifications,
                     "total_certifications": len(certifications),
-                    "candidate_name": self._parsed.get("name", "")
+                    "candidate_name": self._parsed.get("name", ""),
+                    "note": "All education data extracted directly from resume"
                 },
                 metadata={"edu_count": len(all_education), "cert_count": len(certifications)},
                 execution_time=round(time.time() - start, 3)
@@ -985,5 +1069,5 @@ def create_tool_registry() -> MCPToolRegistry:
     reg.register(CoverLetterTool())
     reg.register(ProfileSummaryTool())
     reg.register(JDMatcherTool())
-    reg.register(EducationExtractorTool())  # NEW TOOL
+    reg.register(EducationExtractorTool())
     return reg
