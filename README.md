@@ -100,8 +100,8 @@ resume-chatbot/
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/yourusername/resume-chatbot.git
-   cd resume-chatbot
+   git clone https://github.com/VijaiVenkatesan/Agentic_AI_Resume_Chatbot.git
+   cd Agentic_AI_Resume_Chatbot
 2. Install dependencies
    pip install -r requirements.txt
 3. Set up environment variables
@@ -111,53 +111,61 @@ resume-chatbot/
    http://localhost:8501
    
 ☁️ Deploy to Streamlit Cloud
-1. Push to GitHub
+1. Push to GitHub:
    git add .
    git commit -m "Initial commit"
    git push origin main
-2. Deploy on Streamlit Cloud
+   
+3. Deploy on Streamlit Cloud:
    Go to share.streamlit.io
    Connect your GitHub repository
    Add GROQ_API_KEY in Secrets:
    GROQ_API_KEY = "your-groq-api-key"
+   
 - Deploy!
 
 📋 Requirements
-streamlit>=1.28.0
+streamlit==1.40.0
+langchain>=0.3.25
+langchain-community>=0.3.25
+langchain-core>=0.3.58
+langchain-text-splitters>=0.3.8
+chromadb==1.5.5
 requests>=2.31.0
+numpy<2.0.0
+tiktoken>=0.7.0
 PyPDF2>=3.0.0
-python-docx>=1.0.0
-chromadb>=0.4.0
-langchain-text-splitters>=0.0.1
+python-docx>=1.1.0
+Pillow>=10.0.0
 
 🎯 Usage Examples
 Basic Questions
-"What is the candidate's contact information?"
-"List all technical skills"
-"What is the educational background?"
-"Calculate total years of experience"
+- "What is the candidate's contact information?"
+- "List all technical skills"
+- "What is the educational background?"
+- "Calculate total years of experience"
 
 Skill Analysis
-"Match skills: Python, AWS, Docker, Kubernetes"
-"What are the key technical competencies?"
-"Identify skill gaps for a Senior Engineer role"
+- "Match skills: Python, AWS, Docker, Kubernetes"
+- "What are the key technical competencies?"
+- "Identify skill gaps for a Senior Engineer role"
 
 Content Generation
-"Write a cover letter for Software Engineer at Google"
-"Generate a LinkedIn summary"
-"Create an elevator pitch"
+- "Write a cover letter for Software Engineer at Google"
+- "Generate a LinkedIn summary"
+- "Create an elevator pitch"
 
 JD Matching (with uploaded JD)
-"Compare this resume against the job description"
-"How well does this candidate fit the JD?"
-"What are the strengths and gaps?"
+-"Compare this resume against the job description"
+- "How well does this candidate fit the JD?"
+- "What are the strengths and gaps?"
 
 🔑 Supported AI Models
 Model	Speed	Quality	Best For
-Llama 3.1 8B	⚡⚡ Fast	⭐⭐⭐⭐	Quick queries
-Llama 3.3 70B	🔄 Medium	⭐⭐⭐⭐⭐	Complex analysis
-Llama 4 Scout	⚡ Fast	⭐⭐⭐⭐	Vision/OCR
-Qwen 3 32B	⚡ Fast	⭐⭐⭐⭐⭐	Detailed parsing
+- Llama 3.1 8B	⚡⚡ Fast	⭐⭐⭐⭐	Quick queries
+- Llama 3.3 70B	🔄 Medium	⭐⭐⭐⭐⭐	Complex analysis
+- Llama 4 Scout	⚡ Fast	⭐⭐⭐⭐	Vision/OCR
+- Qwen 3 32B	⚡ Fast	⭐⭐⭐⭐⭐	Detailed parsing
 
 📊 How It Works
 1. Document Processing
@@ -266,17 +274,16 @@ Common Issues
 4. Push to branch (git push origin feature/amazing)
 5. Open a Pull Request
 
-📄 License
-This project is licensed under the MIT License - see the [LICENSE](https://arena.ai/c/LICENSE) file for details.
-
 🙏 Acknowledgments
 Groq - Lightning-fast LLM inference
 Streamlit - Amazing web framework
 ChromaDB - Vector database
 LangChain - Text splitting utilities
+
 📧 Contact
-Author: Your Name
-Email: your.email@example.com
-GitHub: @yourusername
-<p align="center"> Built with ❤️ using Agentic AI + MCP + RAG + Groq </p><p align="center"> <a href="https://agentic-ai-resume-chatbot.streamlit.app/">🚀 Live Demo</a> • <a href="#-quick-start">📖 Documentation</a> • <a href="https://github.com/yourusername/resume-chatbot/issues">🐛 Report Bug</a> </p> ```
+Author: V Vijai
+Email: vijaibt1@gmail.com
+GitHub: https://github.com/VijaiVenkatesan
+
+<p align="center"> Built with ❤️ using Agentic AI + MCP + RAG + Groq </p><p align="center"> <a href="https://agentic-ai-resume-chatbot.streamlit.app/">🚀 Live Demo</a> • <a href="#-quick-start">📖 Documentation</a> </p> ```
 
