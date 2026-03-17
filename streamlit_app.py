@@ -104,22 +104,26 @@ st.markdown("""
     .model-box p { color: #94a3b8 !important; font-size: 0.8rem; margin: 0.1rem 0; }
     .model-box .lbl { color: #a78bfa !important; font-weight: 700; }
 
-    /* ── AGENT TRACE (HIGH CONTRAST FIX) ── */
+    /* ── AGENT TRACE (FINAL HIGH CONTRAST FIX) ── */
 	.trace-step {
 		padding: 14px 18px;
 		margin: 8px 0;
 		border-radius: 8px;
 		font-size: 0.95rem;
 		line-height: 1.6;
-		/* --- NEW: Stronger default background and border --- */
-		background: #d1d5db !important; /* A much more solid gray */
+		background: #d1d5db !important;
 		border-left: 5px solid #6b7280;
 	}
 
-	/* --- NEW: Pure black text for maximum contrast by default --- */
-	.trace-step, .trace-step * { /* Target the div and ALL children inside it */
+	/* --- Default dark text for the title --- */
+	.trace-step strong {
 		color: #000000 !important;
-		opacity: 1 !important; /* Ensure no lingering opacity */
+	}
+
+	/* --- NEW: Highly specific rule for the duration span --- */
+	.trace-step span.trace-duration {
+		color: #4b5563 !important; /* A slightly softer, but still very dark gray */
+		opacity: 1 !important;
 	}
 
 	/* --- Specific override for 'planning' steps --- */
@@ -127,7 +131,7 @@ st.markdown("""
 		background: #fef9c3 !important;
 		border-left: 5px solid #facc15;
 	}
-	.trace-plan, .trace-plan * {
+	.trace-plan, .trace-plan *, .trace-plan span.trace-duration {
 		color: #713f12 !important;
 	}
 
@@ -136,7 +140,7 @@ st.markdown("""
 		background: #dcfce7 !important;
 		border-left: 5px solid #4ade80;
 	}
-	.trace-tool, .trace-tool * {
+	.trace-tool, .trace-tool *, .trace-tool span.trace-duration {
 		color: #14532d !important;
 	}
 
@@ -145,7 +149,7 @@ st.markdown("""
 		background: #dbeafe !important;
 		border-left: 5px solid #818cf8;
 	}
-	.trace-synth, .trace-synth * {
+	.trace-synth, .trace-synth *, .trace-synth span.trace-duration {
 		color: #1e3a8a !important;
 	}
 
@@ -863,7 +867,7 @@ def show_trace(steps, tools_used):
             st.markdown(f"""
             <div class="trace-step {css_class}">
                 <strong style="font-size:1rem;">{title}{details}</strong>
-                <span> ({s.duration}s)</span>
+                <span class="trace-duration"> ({s.duration}s)</span>
             </div>
             """, unsafe_allow_html=True)
 
