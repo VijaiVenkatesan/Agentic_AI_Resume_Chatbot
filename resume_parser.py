@@ -15,7 +15,7 @@ CURRENT_YEAR = 2026
 CURRENT_MONTH = 3  # March 2026
 
 
-PARSE_PROMPT = """You are an expert resume parser. The current date is July 2026.
+PARSE_PROMPT = """You are an expert resume parser. The current date is March 2026.
 
 RESUME TEXT:
 {resume_text}
@@ -114,7 +114,7 @@ CRITICAL RULES:
    - Look for years: graduation year, batch, class of
    - Look for GPA/CGPA/percentage/grades
    - Include high school/secondary education if mentioned
-6. EXPERIENCE: If end_date is "Present" or "Current", calculate duration until July 2026
+6. EXPERIENCE: If end_date is "Present" or "Current", calculate duration until March 2026
 7. duration_years: Calculate as decimal (2 years 6 months = 2.5)
 8. total_experience_years: Sum of all duration_years values
 9. Extract EVERY skill mentioned ANYWHERE in the resume
