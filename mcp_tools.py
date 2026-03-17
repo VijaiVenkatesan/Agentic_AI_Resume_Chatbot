@@ -529,7 +529,7 @@ class ExperienceCalculatorTool(MCPTool):
             return ToolResult(self.name, True, {
                 "candidate_name": self._parsed.get("name", ""),
                 "total_years": round(total, 1),
-                "calculated_as_of": f"July {CURRENT_YEAR}",
+                "calculated_as_of": f"March {CURRENT_YEAR}",
                 "total_positions": len(timeline),
                 "current_role": self._parsed.get("current_role", ""),
                 "current_company": self._parsed.get("current_company", ""),
