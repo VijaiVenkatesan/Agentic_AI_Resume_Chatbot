@@ -105,49 +105,49 @@ st.markdown("""
     .model-box .lbl { color: #a78bfa !important; font-weight: 700; }
 
     /* ── AGENT TRACE (HIGH CONTRAST FIX) ── */
-    .trace-step {
-        padding: 14px 18px;
-        margin: 8px 0;
-        border-radius: 8px;
-        font-size: 0.95rem;
-        line-height: 1.6;
-        /* --- NEW: Default high-contrast background and border --- */
-        background: #e2e8f0 !important;
-        border-left: 5px solid #64748b;
-    }
-    
-    /* --- NEW: Default dark text color for ALL trace steps --- */
-    .trace-step strong, .trace-step span, .trace-step b, .trace-step div {
-        color: #1e293b !important;
-    }
-    
-    /* --- Specific override for 'planning' steps --- */
-    .trace-plan {
-        background: #fef9c3 !important;
-        border-left: 5px solid #ca8a04;
-    }
-    .trace-plan, .trace-plan * { /* Asterisk ensures all child elements are targeted */
-        color: #713f12 !important;
-    }
-    
-    /* --- Specific override for 'tool_call' steps --- */
-    .trace-tool {
-        background: #dcfce7 !important; /* Slightly adjusted for better contrast */
-        border-left: 5px solid #16a34a;
-    }
-    .trace-tool, .trace-tool * {
-        color: #14532d !important;
-    }
-    
-    /* --- Specific override for 'synthesis' steps --- */
-    .trace-synth {
-        background: #dbeafe !important; /* Slightly adjusted for better contrast */
-        border-left: 5px solid #2563eb;
-    }
-    .trace-synth, .trace-synth * {
-        color: #1e3a8a !important;
-    }
+	.trace-step {
+		padding: 14px 18px;
+		margin: 8px 0;
+		border-radius: 8px;
+		font-size: 0.95rem;
+		line-height: 1.6;
+		/* --- NEW: Stronger default background and border --- */
+		background: #d1d5db !important; /* A much more solid gray */
+		border-left: 5px solid #6b7280;
+	}
 
+	/* --- NEW: Pure black text for maximum contrast by default --- */
+	.trace-step, .trace-step * { /* Target the div and ALL children inside it */
+		color: #000000 !important;
+		opacity: 1 !important; /* Ensure no lingering opacity */
+	}
+
+	/* --- Specific override for 'planning' steps --- */
+	.trace-plan {
+		background: #fef9c3 !important;
+		border-left: 5px solid #facc15;
+	}
+	.trace-plan, .trace-plan * {
+		color: #713f12 !important;
+	}
+
+	/* --- Specific override for 'tool_call' steps --- */
+	.trace-tool {
+		background: #dcfce7 !important;
+		border-left: 5px solid #4ade80;
+	}
+	.trace-tool, .trace-tool * {
+		color: #14532d !important;
+	}
+
+	/* --- Specific override for 'synthesis' steps --- */
+	.trace-synth {
+		background: #dbeafe !important;
+		border-left: 5px solid #818cf8;
+	}
+	.trace-synth, .trace-synth * {
+		color: #1e3a8a !important;
+	}
 
     /* ── Tool Badges ── */
     .tbadge {
