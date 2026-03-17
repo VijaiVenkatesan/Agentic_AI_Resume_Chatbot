@@ -106,29 +106,48 @@ st.markdown("""
 
     /* ── AGENT TRACE (HIGH CONTRAST FIX) ── */
     .trace-step {
-        padding: 14px 18px; margin: 8px 0; border-radius: 8px;
-        font-size: 0.95rem; line-height: 1.6;
+        padding: 14px 18px;
+        margin: 8px 0;
+        border-radius: 8px;
+        font-size: 0.95rem;
+        line-height: 1.6;
+        /* --- NEW: Default high-contrast background and border --- */
+        background: #e2e8f0 !important;
+        border-left: 5px solid #64748b;
     }
+    
+    /* --- NEW: Default dark text color for ALL trace steps --- */
+    .trace-step strong, .trace-step span, .trace-step b, .trace-step div {
+        color: #1e293b !important;
+    }
+    
+    /* --- Specific override for 'planning' steps --- */
     .trace-plan {
         background: #fef9c3 !important;
         border-left: 5px solid #ca8a04;
     }
-    .trace-plan strong, .trace-plan span, .trace-plan br,
-    .trace-plan { color: #713f12 !important; }
-
+    .trace-plan, .trace-plan * { /* Asterisk ensures all child elements are targeted */
+        color: #713f12 !important;
+    }
+    
+    /* --- Specific override for 'tool_call' steps --- */
     .trace-tool {
-        background: #bbf7d0 !important;
+        background: #dcfce7 !important; /* Slightly adjusted for better contrast */
         border-left: 5px solid #16a34a;
     }
-    .trace-tool strong, .trace-tool span, .trace-tool br,
-    .trace-tool { color: #14532d !important; }
-
+    .trace-tool, .trace-tool * {
+        color: #14532d !important;
+    }
+    
+    /* --- Specific override for 'synthesis' steps --- */
     .trace-synth {
-        background: #bfdbfe !important;
+        background: #dbeafe !important; /* Slightly adjusted for better contrast */
         border-left: 5px solid #2563eb;
     }
-    .trace-synth strong, .trace-synth span, .trace-synth br,
-    .trace-synth { color: #1e3a8a !important; }
+    .trace-synth, .trace-synth * {
+        color: #1e3a8a !important;
+    }
+
 
     /* ── Tool Badges ── */
     .tbadge {
@@ -844,7 +863,7 @@ def show_trace(steps, tools_used):
             st.markdown(f"""
             <div class="trace-step {css_class}">
                 <strong style="font-size:1rem;">{title}{details}</strong>
-                <span style="opacity:0.9;"> ({s.duration}s)</span>
+                <span style="opacity:0.7;"> ({s.duration}s)</span>
             </div>
             """, unsafe_allow_html=True)
 
