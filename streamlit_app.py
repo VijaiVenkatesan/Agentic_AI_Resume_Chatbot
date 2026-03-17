@@ -842,9 +842,9 @@ def show_trace(steps, tools_used):
                 details = f" — <b>{s.tool_name}</b> {status}"
 
             st.markdown(f"""
-            <div class="trace-step {css_class}" style="color: #000000 !important;">
+            <div class="trace-step {css_class}">
                 <strong style="font-size:1rem;">{title}{details}</strong>
-                <span style="opacity:0.7;"> ({s.duration}s)</span>
+                <span style="opacity:0.9;"> ({s.duration}s)</span>
             </div>
             """, unsafe_allow_html=True)
 
