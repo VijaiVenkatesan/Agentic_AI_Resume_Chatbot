@@ -1,6 +1,6 @@
 # 🤖 Universal AI Resume Assistant
 
-An intelligent, agentic AI-powered resume chatbot that can parse, analyze, and answer questions about any resume using advanced RAG (Retrieval-Augmented Generation) and MCP (Model Context Protocol) tools.
+An intelligent, agentic AI-powered resume chatbot that can parse, analyze, and answer questions about any resume using Agentic RAG (Retrieval-Augmented Generation) and MCP (Model Context Protocol) tools.
 
 ![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.28+-red.svg)
@@ -152,7 +152,7 @@ Common Issues
   
 4. Preview not working
 - PDF preview uses extracted text (not iframe)
-- mages display inline with base64
+- Images display inline with base64
 - Use Download button for original file
 
 🤝 Contributing
