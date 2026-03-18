@@ -6,6 +6,35 @@ An intelligent, agentic AI-powered resume chatbot that can parse, analyze, and a
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.28+-red.svg)
 ![Groq](https://img.shields.io/badge/Groq-LLM-green.svg)
 
+### Project Architecture
+
+```mermaid
+graph TD
+    subgraph "Phase 1: Document Ingestion & Vectorization"
+        A[User Uploads Resume via Streamlit UI] --> B(Load Document);
+        B --> C(Split into Text Chunks <br><i>LangChain</i>);
+        C --> D(Generate Embeddings);
+        D --> E((Store in ChromaDB));
+    end
+
+    subgraph "Phase 2: Conversational RAG Cycle"
+        H[User Asks Question] --> I(Create Query Embedding);
+        I --> J((ChromaDB));
+        J -- Retrieved Context --> K(Augmented Prompt = <br> - User Question <br> - Retrieved Context);
+        H -- Original Question --> K;
+        K --> L(LLM Inference <br><i>Groq API - Llama 3</i>);
+        L --> M[Display Answer in Streamlit UI];
+    end
+
+    %% This invisible link forces the correct layout order
+    E ~~~ H
+
+    style E fill:#d5f5e3,stroke:#333,stroke-width:2px
+    style J fill:#d5f5e3,stroke:#333,stroke-width:2px
+    style L fill:#cce5ff,stroke:#333,stroke-width:2px
+```
+
+
 ## ✨ Features
 
 - **📄 Universal Resume Parsing** - Supports PDF, DOCX, TXT, and Images (JPG, PNG, WEBP)
