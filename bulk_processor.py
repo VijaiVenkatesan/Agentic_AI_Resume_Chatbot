@@ -723,7 +723,78 @@ def get_all_certifications(parsed_resume: Dict) -> str:
                 cert_entries.append(cert)
     
     return " || ".join(cert_entries) if cert_entries else "Not specified"
+    
 
+def _extract_email_from_text(text: str) -> str:
+    """Extract email from text using multiple patterns"""
+    patterns = [
+        r'[\w._%+-]+@[\w.-]+\.[a-zA-Z]{2,}',
+        r'[\w._%+-]+\s*@\s*[\w.-]+\s*\.\s*[a-zA-Z]{2,}',
+        r'[\w._%+-]+\[at\][\w.-]+\.[a-zA-Z]{2,}',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            email = match.group(0).strip()
+            email = re.sub(r'\s+', '', email)
+            email = re.sub(r'\[at\]|\(at\)', '@', email, flags=re.IGNORECASE)
+            return email
+    
+    return ""
+
+
+def _extract_phone_from_text(text: str) -> str:
+    """Extract phone from text using multiple patterns"""
+    patterns = [
+        r'\+\d{1,3}[-.\s]?\(?\d{2,5}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}',
+        r'\+\d{1,3}[-.\s]?\d{4,5}[-.\s]?\d{5,6}',
+        r'\+\d{10,15}',
+        r'\+91[-.\s]?\d{5}[-.\s]?\d{5}',
+        r'\+91[-.\s]?\d{10}',
+        r'\(\d{3}\)\s*\d{3}[-.\s]?\d{4}',
+        r'\d{3}[-.\s]\d{3}[-.\s]\d{4}',
+        r'\b\d{10,12}\b',
+    ]
+    
+    for pattern in patterns:
+        matches = re.findall(pattern, text, re.IGNORECASE)
+        for match in matches:
+            cleaned = match.strip()
+            digits = re.sub(r'[^\d]', '', cleaned)
+            if 10 <= len(digits) <= 15:
+                return cleaned
+    
+    return ""
+
+
+def _extract_location_from_text(text: str) -> str:
+    """Extract location from text"""
+    # Common cities
+    cities = [
+        'Bangalore', 'Bengaluru', 'Mumbai', 'Delhi', 'Chennai', 'Hyderabad',
+        'Pune', 'Kolkata', 'Noida', 'Gurgaon', 'Gurugram', 'Ahmedabad',
+        'New York', 'San Francisco', 'Seattle', 'Austin', 'Boston', 'Chicago',
+        'Los Angeles', 'London', 'Berlin', 'Singapore', 'Dubai', 'Toronto'
+    ]
+    
+    text_lower = text.lower()
+    
+    for city in cities:
+        if city.lower() in text_lower:
+            # Try to get more context (city, state/country)
+            pattern = rf'\b{city}\b[,\s]*[\w\s]{{0,30}}'
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                location = match.group(0).strip()
+                # Clean up
+                location = re.sub(r'\s+', ' ', location)
+                if len(location) < 50:
+                    return location
+            return city
+    
+    return ""
+    
 
 def process_single_resume_for_bulk(
     file_data: Dict,
@@ -732,7 +803,11 @@ def process_single_resume_for_bulk(
     groq_api_key: str,
     model_id: str
 ) -> CandidateResult:
-    """Process a single resume in bulk mode - NO TRUNCATION"""
+    """
+    Process a single resume in bulk mode - Enhanced extraction
+    Uses multiple extraction strategies for maximum accuracy
+    NO TRUNCATION on any field
+    """
     start_time = time.time()
     
     file_name = file_data.get("file_name", "Unknown")
@@ -744,7 +819,7 @@ def process_single_resume_for_bulk(
         if not resume_text or len(resume_text.strip()) < 50:
             return CandidateResult(
                 file_name=file_name,
-                candidate_name="[Error]",
+                candidate_name="[Error - No Text]",
                 email="",
                 phone="",
                 location="",
@@ -753,58 +828,188 @@ def process_single_resume_for_bulk(
                 total_experience=0,
                 highest_education="",
                 success=False,
-                error="Could not extract text from resume",
+                error="Could not extract text from resume. File may be corrupted, image-based without OCR, or empty.",
                 processing_time=round(time.time() - start_time, 2)
             )
         
-        # Parse resume with LLM
-        parsed = parse_resume_with_llm(resume_text, groq_api_key, model_id)
+        # ═══════════════════════════════════════════════════════════
+        # STEP 1: Get pre-extracted contacts from document processor
+        # ═══════════════════════════════════════════════════════════
+        doc_contacts = file_data.get("extracted_contacts", {})
         
-        # Calculate match scores
+        # If not available, extract now
+        if not doc_contacts:
+            try:
+                from document_processor import extract_contacts_from_text
+                doc_contacts = extract_contacts_from_text(resume_text)
+            except ImportError:
+                doc_contacts = {}
+        
+        # ═══════════════════════════════════════════════════════════
+        # STEP 2: Parse resume with LLM
+        # ═══════════════════════════════════════════════════════════
+        try:
+            parsed = parse_resume_with_llm(resume_text, groq_api_key, model_id)
+        except Exception as parse_error:
+            # If LLM parsing fails, create basic parsed structure from doc_contacts
+            parsed = {
+                "name": doc_contacts.get("name", ""),
+                "email": doc_contacts.get("email", ""),
+                "phone": doc_contacts.get("phone", ""),
+                "location": doc_contacts.get("location", ""),
+                "address": doc_contacts.get("address", ""),
+                "linkedin": doc_contacts.get("linkedin", ""),
+                "github": doc_contacts.get("github", ""),
+                "current_role": "",
+                "current_company": "",
+                "total_experience_years": 0,
+                "education": [],
+                "skills": {},
+                "work_history": [],
+                "certifications": [],
+                "professional_summary": resume_text[:500] if resume_text else ""
+            }
+        
+        # ═══════════════════════════════════════════════════════════
+        # STEP 3: Enhanced contact merging - Fill gaps from doc_contacts
+        # ═══════════════════════════════════════════════════════════
+        
+        # Name - try multiple sources
+        candidate_name = _get_best_name(parsed, doc_contacts, file_name, resume_text)
+        
+        # Email - use best available
+        email = _get_best_value(
+            parsed.get("email", ""),
+            doc_contacts.get("email", ""),
+            validator=lambda x: "@" in x and "." in x
+        )
+        
+        # Phone - use best available
+        phone = _get_best_value(
+            parsed.get("phone", ""),
+            doc_contacts.get("phone", ""),
+            validator=lambda x: len(re.sub(r'[^\d]', '', x)) >= 10
+        )
+        
+        # Location - combine location and address
+        location = _get_best_value(
+            parsed.get("location", ""),
+            doc_contacts.get("location", ""),
+            parsed.get("address", ""),
+            doc_contacts.get("address", "")
+        )
+        
+        # LinkedIn
+        linkedin = _get_best_value(
+            parsed.get("linkedin", ""),
+            doc_contacts.get("linkedin", ""),
+            validator=lambda x: "linkedin" in x.lower()
+        )
+        
+        # GitHub
+        github = _get_best_value(
+            parsed.get("github", ""),
+            doc_contacts.get("github", ""),
+            validator=lambda x: "github" in x.lower()
+        )
+        
+        # Update parsed with best values
+        parsed["name"] = candidate_name
+        parsed["email"] = email
+        parsed["phone"] = phone
+        parsed["location"] = location
+        parsed["linkedin"] = linkedin
+        parsed["github"] = github
+        
+        # ═══════════════════════════════════════════════════════════
+        # STEP 4: Calculate match scores
+        # ═══════════════════════════════════════════════════════════
         scores = calculate_match_scores(parsed, resume_text, jd_text, jd_requirements)
         
-        # Get candidate details - FULL VALUES
-        candidate_name = parsed.get("name", "Unknown")
-        if not candidate_name or candidate_name in ["", "N/A", "Unknown", "Candidate"]:
-            candidate_name = file_name.rsplit(".", 1)[0].replace("_", " ").replace("-", " ").title()
+        # ═══════════════════════════════════════════════════════════
+        # STEP 5: Extract additional details
+        # ═══════════════════════════════════════════════════════════
         
+        # Current role and company
+        current_role = parsed.get("current_role", "")
+        current_company = parsed.get("current_company", "")
+        
+        # If not found, try to extract from work history
+        if not current_role or not current_company:
+            work_history = parsed.get("work_history", parsed.get("experience", []))
+            if isinstance(work_history, list) and work_history:
+                # Get first (most recent) job
+                first_job = work_history[0] if isinstance(work_history[0], dict) else {}
+                
+                if not current_role:
+                    current_role = (
+                        first_job.get("title", "") or 
+                        first_job.get("role", "") or 
+                        first_job.get("position", "")
+                    )
+                
+                if not current_company:
+                    current_company = (
+                        first_job.get("company", "") or 
+                        first_job.get("organization", "") or
+                        first_job.get("employer", "")
+                    )
+        
+        # Total experience
         total_exp = parsed.get("total_experience_years", 0)
         try:
             total_exp = float(total_exp)
         except (ValueError, TypeError):
             total_exp = 0
         
-        # Build result - NO TRUNCATION on any field
+        # If experience is 0, try to calculate from work history
+        if total_exp == 0:
+            work_history = parsed.get("work_history", parsed.get("experience", []))
+            if isinstance(work_history, list):
+                for job in work_history:
+                    if isinstance(job, dict):
+                        job_years = job.get("duration_years", job.get("years", 0))
+                        try:
+                            total_exp += float(job_years)
+                        except (ValueError, TypeError):
+                            pass
+        
+        # ═══════════════════════════════════════════════════════════
+        # STEP 6: Build result - NO TRUNCATION on any field
+        # ═══════════════════════════════════════════════════════════
         result = CandidateResult(
             file_name=file_name,
             candidate_name=candidate_name,
-            email=parsed.get("email", ""),
-            phone=parsed.get("phone", ""),
-            location=parsed.get("location", "") or parsed.get("address", ""),
-            current_role=parsed.get("current_role", ""),
-            current_company=parsed.get("current_company", ""),
+            email=email,
+            phone=phone,
+            location=location,  # FULL VALUE
+            current_role=current_role,  # FULL VALUE
+            current_company=current_company,  # FULL VALUE
             total_experience=round(total_exp, 1),
-            highest_education=get_highest_education(parsed),
+            highest_education=get_highest_education(parsed),  # FULL VALUE
             overall_score=scores["overall_score"],
             skills_score=scores["skills_score"],
             experience_score=scores["experience_score"],
             education_score=scores["education_score"],
             location_score=scores["location_score"],
             keyword_score=scores["keyword_score"],
-            matched_skills=scores["matched_skills"],  # ALL - no limit
-            missing_skills=scores["missing_skills"],  # ALL - no limit
+            matched_skills=scores["matched_skills"],  # ALL skills - no limit
+            missing_skills=scores["missing_skills"],  # ALL skills - no limit
             strengths=scores["strengths"],  # ALL
             gaps=scores["gaps"],  # ALL
             recommendation=scores["recommendation"],
             processing_time=round(time.time() - start_time, 2),
             success=True,
-            parsed_resume=parsed,
-            resume_text=resume_text
+            parsed_resume=parsed,  # Store full parsed data
+            resume_text=resume_text  # Store full text
         )
         
         return result
         
     except Exception as e:
+        import traceback
+        error_detail = f"{str(e)}\n{traceback.format_exc()}"
+        
         return CandidateResult(
             file_name=file_name,
             candidate_name="[Error]",
@@ -816,9 +1021,105 @@ def process_single_resume_for_bulk(
             total_experience=0,
             highest_education="",
             success=False,
-            error=str(e),
+            error=str(e),  # Keep error message
             processing_time=round(time.time() - start_time, 2)
         )
+
+
+def _get_best_name(parsed: Dict, doc_contacts: Dict, file_name: str, resume_text: str) -> str:
+    """
+    Get the best candidate name from multiple sources
+    Priority: Valid parsed > Valid doc_contacts > Extracted from text > Filename
+    """
+    # List of invalid/placeholder names
+    invalid_names = [
+        "", "n/a", "na", "none", "unknown", "candidate", "your name",
+        "first last", "firstname lastname", "name", "full name",
+        "[name]", "<name>", "null", "-", "—"
+    ]
+    
+    def is_valid_name(name: str) -> bool:
+        if not name:
+            return False
+        name_lower = name.lower().strip()
+        if name_lower in invalid_names:
+            return False
+        # Should have at least 2 parts and be mostly alphabetic
+        words = name.split()
+        if len(words) < 2:
+            return False
+        alpha_chars = sum(1 for c in name if c.isalpha() or c.isspace())
+        if alpha_chars / max(len(name), 1) < 0.8:
+            return False
+        # Each word should be reasonable length
+        if not all(1 <= len(w) <= 20 for w in words):
+            return False
+        return True
+    
+    # Try parsed name first
+    parsed_name = parsed.get("name", "").strip()
+    if is_valid_name(parsed_name):
+        return parsed_name
+    
+    # Try doc_contacts name
+    doc_name = doc_contacts.get("name", "").strip()
+    if is_valid_name(doc_name):
+        return doc_name
+    
+    # Try to extract from resume text using patterns
+    try:
+        from document_processor import extract_name_from_text
+        extracted_name = extract_name_from_text(resume_text)
+        if is_valid_name(extracted_name):
+            return extracted_name
+    except ImportError:
+        pass
+    
+    # Try extracting from first few lines of resume
+    lines = resume_text.strip().split('\n')[:10]
+    for line in lines:
+        line = line.strip()
+        # Skip empty lines and lines with common non-name content
+        if not line or len(line) < 4 or len(line) > 50:
+            continue
+        if '@' in line or any(c.isdigit() for c in line[:5]):
+            continue
+        
+        # Check if line looks like a name (2-4 capitalized words)
+        words = line.split()
+        if 2 <= len(words) <= 4:
+            if all(w[0].isupper() for w in words if w):
+                alpha_ratio = sum(1 for c in line if c.isalpha() or c.isspace()) / len(line)
+                if alpha_ratio > 0.85:
+                    return line
+    
+    # Last resort: use filename
+    name_from_file = file_name.rsplit(".", 1)[0]
+    name_from_file = re.sub(r'[_\-]', ' ', name_from_file)
+    name_from_file = re.sub(r'\s+', ' ', name_from_file).strip().title()
+    
+    # Clean up common file name patterns
+    name_from_file = re.sub(r'(?i)\s*(resume|cv|curriculum|vitae)\s*', ' ', name_from_file)
+    name_from_file = re.sub(r'\s+', ' ', name_from_file).strip()
+    
+    if is_valid_name(name_from_file):
+        return name_from_file
+    
+    return "Unknown Candidate"
+
+
+def _get_best_value(*values, validator=None) -> str:
+    """
+    Get the best non-empty value from multiple sources
+    Optionally validate with a custom validator function
+    """
+    for value in values:
+        if value and isinstance(value, str):
+            value = value.strip()
+            if value and value.lower() not in ['n/a', 'na', 'none', 'null', '-', '—', 'unknown']:
+                if validator is None or validator(value):
+                    return value
+    return ""
 
 
 def process_bulk_resumes(
