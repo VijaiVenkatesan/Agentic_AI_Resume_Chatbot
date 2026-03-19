@@ -13,3 +13,4 @@ Pillow>=10.0.0
 pandas>=2.0.0
 openpyxl>=3.1.0
 xlsxwriter>=3.1.0
+olefile>=0.46
