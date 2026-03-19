@@ -1,5 +1,5 @@
 """
-Agentic AI Orchestrator - V3
+Agentic AI Orchestrator - V4
 STRICT: No hallucination, no duplicates, only original data
 JD-aware, Education-aware, 2026 experience
 Plan → Execute MCP Tools → Synthesize
@@ -8,7 +8,7 @@ Plan → Execute MCP Tools → Synthesize
 import json
 import time
 import requests
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Set
 from dataclasses import dataclass, field
 from mcp_tools import MCPToolRegistry, ToolResult
 
@@ -54,7 +54,7 @@ SYNTHESIS_PROMPT = """You are a professional AI resume assistant. Current year i
 
 ⚠️ CRITICAL RULES - READ CAREFULLY:
 
-1. **NO HALLUCINATION**: 
+1. **NO HALLUCINATION**:
    - ONLY use information from the tool results below
    - NEVER invent, assume, or make up ANY information
    - If data is not in tool results, say "Not mentioned in resume" or "Information not available"
@@ -132,7 +132,9 @@ class ResumeAgent:
         self.jd_text = jd_text
         self.has_jd = bool(jd_text and len(jd_text.strip()) > 50)
 
-    def _call_groq(self, system: str, user: str, temp: float = 0.3) -> str:
+    def _call_groq(self, system: str, user: str, temp: float = 0.3,
+                   max_tokens: int = 3500) -> str:
+        """Call Groq API with model fallback chain."""
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
@@ -144,12 +146,17 @@ class ResumeAgent:
                 {"role": "user", "content": user}
             ],
             "temperature": temp,
-            "max_tokens": 3500,
+            "max_tokens": max_tokens,
         }
 
+        # Deduplicate model list while preserving order
         models = [self.model_id, "llama-3.1-8b-instant", "llama-3.3-70b-versatile"]
-        seen = set()
-        unique = [m for m in models if m not in seen and not seen.add(m)]
+        seen: Set[str] = set()
+        unique: List[str] = []
+        for m in models:
+            if m not in seen:
+                seen.add(m)
+                unique.append(m)
 
         for m in unique:
             payload["model"] = m
@@ -160,8 +167,16 @@ class ResumeAgent:
                 )
                 if r.status_code == 200:
                     return r.json()["choices"][0]["message"]["content"]
+                elif r.status_code == 429:
+                    # Rate limited — wait briefly and try next model
+                    time.sleep(0.5)
+                    continue
                 elif r.status_code == 400:
                     continue
+                else:
+                    continue
+            except requests.exceptions.Timeout:
+                continue
             except Exception:
                 continue
         return "Error: Could not get response from any model."
@@ -188,11 +203,10 @@ class ResumeAgent:
 
     def _plan(self, question: str) -> Tuple[List[Dict], AgentStep]:
         start = time.time()
-        
+
         # Check if JD comparison is needed but JD not available
         needs_jd = self._is_jd_comparison_query(question)
         if needs_jd and not self.has_jd:
-            # Return a special response indicating JD is needed
             step = AgentStep(
                 "planning",
                 input_data={"question": question},
@@ -204,7 +218,7 @@ class ResumeAgent:
                 duration=round(time.time() - start, 3)
             )
             return [{"tool_name": "profile_summary", "parameters": {"context": "detailed"}}], step
-        
+
         jd_ctx = ""
         if self.has_jd:
             jd_ctx = (
@@ -225,10 +239,12 @@ class ResumeAgent:
             question=question
         )
 
+        # Planning needs fewer tokens
         response = self._call_groq(
-            "Return ONLY valid JSON. No markdown. No code blocks. Follow JD rules strictly.", 
-            prompt, 
-            0.1
+            "Return ONLY valid JSON. No markdown. No code blocks. Follow JD rules strictly.",
+            prompt,
+            temp=0.1,
+            max_tokens=1500
         )
 
         try:
@@ -247,16 +263,20 @@ class ResumeAgent:
         # Filter out JD matcher if no JD uploaded
         if not self.has_jd:
             tools = [t for t in tools if t.get("tool_name") != "jd_matcher"]
-            # Also remove skill_analyzer with required_skills if no JD and not explicit skill match
+            # Clear required_skills from skill_analyzer if no explicit skill match query
             if not self._is_skill_match_query(question):
                 for t in tools:
                     if t.get("tool_name") == "skill_analyzer":
-                        t["parameters"] = {"required_skills": ""}  # Clear required skills
+                        if "parameters" not in t:
+                            t["parameters"] = {}
+                        t["parameters"]["required_skills"] = ""
 
         # Auto-inject JD text into jd_matcher calls only if JD exists
         if self.has_jd:
             for t in tools:
-                if t["tool_name"] == "jd_matcher":
+                if t.get("tool_name") == "jd_matcher":
+                    if "parameters" not in t:
+                        t["parameters"] = {}
                     t["parameters"]["jd_text"] = self.jd_text
 
         step = AgentStep(
@@ -264,7 +284,7 @@ class ResumeAgent:
             input_data={"question": question},
             output_data={
                 "reasoning": reasoning,
-                "planned_tools": [t["tool_name"] for t in tools],
+                "planned_tools": [t.get("tool_name", "") for t in tools],
                 "has_jd": self.has_jd
             },
             duration=round(time.time() - start, 3)
@@ -274,62 +294,87 @@ class ResumeAgent:
     def _get_fallback_tools(self, question: str) -> List[Dict]:
         """Get fallback tools based on question keywords"""
         q_lower = question.lower()
-        tools = []
-        
+        tools: List[Dict] = []
+
         # Education keywords
-        edu_keywords = ["education", "degree", "university", "college", "school", 
-                       "gpa", "cgpa", "qualification", "bachelor", "master", "phd",
-                       "b.tech", "m.tech", "graduated", "studied", "academic"]
+        edu_keywords = [
+            "education", "degree", "university", "college", "school",
+            "gpa", "cgpa", "qualification", "bachelor", "master", "phd",
+            "b.tech", "m.tech", "graduated", "studied", "academic",
+        ]
         if any(kw in q_lower for kw in edu_keywords):
-            tools.append({"tool_name": "education_extractor", "parameters": {"include_certifications": True}})
-        
+            tools.append({"tool_name": "education_extractor",
+                          "parameters": {"include_certifications": True}})
+
         # Experience keywords
-        exp_keywords = ["experience", "work", "job", "career", "years", "timeline", "history", "company"]
+        exp_keywords = [
+            "experience", "work", "job", "career", "years",
+            "timeline", "history", "company",
+        ]
         if any(kw in q_lower for kw in exp_keywords):
-            tools.append({"tool_name": "experience_calculator", "parameters": {"category": "all"}})
-        
+            tools.append({"tool_name": "experience_calculator",
+                          "parameters": {"category": "all"}})
+
         # Skills keywords (without matching if no JD)
-        skill_keywords = ["skill", "technology", "tech stack", "proficient", "expertise", "tools"]
+        skill_keywords = [
+            "skill", "technology", "tech stack", "proficient",
+            "expertise", "tools",
+        ]
         if any(kw in q_lower for kw in skill_keywords):
-            tools.append({"tool_name": "skill_analyzer", "parameters": {"required_skills": ""}})
-        
+            tools.append({"tool_name": "skill_analyzer",
+                          "parameters": {"required_skills": ""}})
+
         # Contact keywords
-        contact_keywords = ["contact", "email", "phone", "linkedin", "github", "reach", "address"]
+        contact_keywords = [
+            "contact", "email", "phone", "linkedin",
+            "github", "reach", "address",
+        ]
         if any(kw in q_lower for kw in contact_keywords):
-            tools.append({"tool_name": "profile_summary", "parameters": {"context": "detailed"}})
-        
+            tools.append({"tool_name": "profile_summary",
+                          "parameters": {"context": "detailed"}})
+
         # Cover letter
         if "cover letter" in q_lower:
-            tools.append({"tool_name": "cover_letter_generator", "parameters": {"job_title": "", "company_name": ""}})
-        
+            tools.append({"tool_name": "cover_letter_generator",
+                          "parameters": {"job_title": "", "company_name": ""}})
+
         # Summary/profile
-        summary_keywords = ["summary", "profile", "bio", "about", "linkedin", "introduction"]
+        summary_keywords = [
+            "summary", "profile", "bio", "about",
+            "linkedin", "introduction",
+        ]
         if any(kw in q_lower for kw in summary_keywords):
-            tools.append({"tool_name": "profile_summary", "parameters": {"context": "linkedin"}})
-        
-        # JD matching - only if JD is uploaded
+            tools.append({"tool_name": "profile_summary",
+                          "parameters": {"context": "linkedin"}})
+
+        # JD matching — only if JD is uploaded
         if self.has_jd and self._is_jd_comparison_query(q_lower):
-            tools.append({"tool_name": "jd_matcher", "parameters": {"jd_text": self.jd_text}})
-        
+            tools.append({"tool_name": "jd_matcher",
+                          "parameters": {"jd_text": self.jd_text}})
+
         # Always add resume search for context
-        tools.append({"tool_name": "resume_search", "parameters": {"query": question}})
-        
-        return tools if tools else [{"tool_name": "resume_search", "parameters": {"query": question}}]
+        tools.append({"tool_name": "resume_search",
+                      "parameters": {"query": question}})
+
+        return tools if tools else [
+            {"tool_name": "resume_search", "parameters": {"query": question}}
+        ]
 
     def _execute_tools(self, tools: List[Dict]) -> Tuple[List[ToolResult], List[AgentStep]]:
-        results, steps = [], []
-        executed_tools = set()  # Prevent duplicate tool execution
-        
+        results: List[ToolResult] = []
+        steps: List[AgentStep] = []
+        executed_tools: Set[str] = set()
+
         for tc in tools:
             name = tc.get("tool_name", "")
             params = tc.get("parameters", {})
-            
-            # Skip duplicate tools
-            tool_key = f"{name}_{json.dumps(params, sort_keys=True)}"
+
+            # Skip duplicate tool calls
+            tool_key = f"{name}_{json.dumps(params, sort_keys=True, default=str)}"
             if tool_key in executed_tools:
                 continue
             executed_tools.add(tool_key)
-            
+
             start = time.time()
 
             if name not in self.registry.tool_names:
@@ -354,10 +399,11 @@ class ResumeAgent:
         return results, steps
 
     def _synthesize(self, question: str, results: List[ToolResult],
-                    history: List[Dict] = None, jd_required: bool = False) -> Tuple[str, AgentStep]:
+                    history: Optional[List[Dict]] = None,
+                    jd_required: bool = False) -> Tuple[str, AgentStep]:
         start = time.time()
 
-        # Check if JD was required but not available
+        # JD required but not available
         if jd_required and not self.has_jd:
             no_jd_response = (
                 "## ⚠️ Job Description Required\n\n"
@@ -375,30 +421,39 @@ class ResumeAgent:
             step = AgentStep("synthesis", duration=round(time.time() - start, 3))
             return no_jd_response, step
 
+        # Build tool results text
         results_text = ""
         for r in results:
             results_text += f"\n### Tool: {r.tool_name}\n"
             results_text += f"Status: {'OK' if r.success else 'FAIL'}\n"
             if r.success:
-                results_text += f"Data:\n{json.dumps(r.data, indent=2, default=str)[:5000]}\n"
+                data_str = json.dumps(r.data, indent=2, default=str)
+                # Allow more data for complex tools
+                max_len = 6000 if r.tool_name in ("jd_matcher", "resume_search") else 5000
+                results_text += f"Data:\n{data_str[:max_len]}\n"
             else:
                 results_text += f"Error: {r.error}\n"
 
-        # Add JD status to context
-        jd_status = ""
+        # Add JD status warning
         if not self.has_jd:
-            jd_status = "\n\n⚠️ NOTE: No Job Description is uploaded. Do NOT create any skill match percentages or job fit scores."
+            results_text += (
+                "\n\n⚠️ NOTE: No Job Description is uploaded. "
+                "Do NOT create any skill match percentages or job fit scores."
+            )
 
         prompt = SYNTHESIS_PROMPT.format(
-            tool_results=results_text + jd_status, 
+            tool_results=results_text,
             question=question
         )
 
-        history_ctx = ""
+        # Add conversation history context (clearly separated)
         if history:
-            for msg in history[-4:]:
+            recent = history[-4:]
+            history_lines = ["\n\n--- Recent conversation context ---"]
+            for msg in recent:
                 role = "User" if msg["role"] == "user" else "Assistant"
-                history_ctx += f"\n{role}: {msg['content'][:200]}"
+                history_lines.append(f"{role}: {msg['content'][:200]}")
+            prompt += "\n".join(history_lines)
 
         system_prompt = (
             "You are a precise resume assistant. "
@@ -409,23 +464,27 @@ class ResumeAgent:
             "Do NOT create match scores without actual JD comparison data."
         )
 
-        answer = self._call_groq(system_prompt, prompt + history_ctx, 0.5)
+        # Synthesis needs more tokens for detailed responses
+        answer = self._call_groq(system_prompt, prompt, temp=0.5, max_tokens=4000)
         step = AgentStep("synthesis", duration=round(time.time() - start, 3))
         return answer, step
 
-    def run(self, question: str, history: List[Dict] = None) -> AgentResponse:
+    def run(self, question: str, history: Optional[List[Dict]] = None) -> AgentResponse:
         total_start = time.time()
-        all_steps = []
+        all_steps: List[AgentStep] = []
 
         tools_to_call, plan_step = self._plan(question)
         all_steps.append(plan_step)
-        
+
         # Check if JD was required
-        jd_required = plan_step.output_data.get("jd_required", False) if plan_step.output_data else False
+        jd_required = (
+            plan_step.output_data.get("jd_required", False)
+            if plan_step.output_data else False
+        )
 
         results, exec_steps = self._execute_tools(tools_to_call)
         all_steps.extend(exec_steps)
-        tools_used = list(set([s.tool_name for s in exec_steps if s.tool_name]))  # Deduplicate
+        tools_used = list(set(s.tool_name for s in exec_steps if s.tool_name))
 
         answer, synth_step = self._synthesize(question, results, history, jd_required)
         all_steps.append(synth_step)
