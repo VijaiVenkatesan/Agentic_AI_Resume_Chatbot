@@ -16,8 +16,8 @@ from resume_parser import parse_resume_with_llm, get_resume_display_summary
 from mcp_tools import create_tool_registry
 from agent import ResumeAgent
 from bulk_processor import (
-    process_bulk_resumes, 
-    results_to_dataframe, 
+    process_bulk_resumes,
+    results_to_dataframe,
     export_results_to_excel,
     export_results_to_csv,
     BulkProcessingResult,
@@ -327,7 +327,7 @@ def get_default_state():
     return {
         # Mode
         "bulk_mode": False,
-        
+
         # Single mode states
         "messages": [],
         "selected_model": DEFAULT_MODEL,
@@ -347,7 +347,7 @@ def get_default_state():
         "raw_file_bytes": None,
         "raw_file_name": None,
         "raw_file_type": None,
-        
+
         # Bulk mode states
         "bulk_files": [],
         "bulk_results": None,
@@ -444,22 +444,120 @@ def run_agent(question: str):
     return agent.run(question, st.session_state.messages), mi
 
 
+def display_candidate_cards(candidates_list):
+    """Render a list of CandidateResult cards inside the current Streamlit container."""
+    if not candidates_list:
+        st.info("No candidates in this category")
+        return
+
+    for candidate in candidates_list:
+        if not candidate.success:
+            continue
+
+        score_class = get_score_class(candidate.overall_score)
+        rank_class = get_rank_class(candidate.rank)
+
+        # Get deduplicated highest education for display
+        highest_edu = candidate.highest_education
+        if len(highest_edu) > 80:
+            display_edu = highest_edu[:80] + "..."
+        else:
+            display_edu = highest_edu
+
+        with st.container():
+            st.markdown(f"""
+                <div class="candidate-card">
+                    <div style="display: flex; align-items: center; margin-bottom: 12px;">
+                        <span class="candidate-rank {rank_class}">#{candidate.rank}</span>
+                        <div style="flex: 1;">
+                            <strong style="font-size: 1.1rem; color: #f1f5f9;">{candidate.candidate_name}</strong>
+                            <p style="margin: 2px 0; color: #94a3b8; font-size: 0.85rem;">
+                                {candidate.current_role} {f'at {candidate.current_company}' if candidate.current_company else ''}
+                            </p>
+                        </div>
+                        <span class="score-badge {score_class}">{candidate.overall_score}%</span>
+                    </div>
+                    <div class="score-breakdown">
+                        <span class="mini-score">🎯 Skills: {candidate.skills_score}%</span>
+                        <span class="mini-score">💼 Exp: {candidate.experience_score}%</span>
+                        <span class="mini-score">🎓 Edu: {candidate.education_score}%</span>
+                        <span class="mini-score">📍 Location: {candidate.location_score}%</span>
+                        <span class="mini-score">📅 {candidate.total_experience}y exp</span>
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
+
+            with st.expander(f"📋 Details - {candidate.candidate_name}"):
+                detail_col1, detail_col2 = st.columns(2)
+
+                with detail_col1:
+                    st.markdown("**📞 Contact:**")
+                    if candidate.email:
+                        st.write(f"📧 {candidate.email}")
+                    if candidate.phone:
+                        st.write(f"📱 {candidate.phone}")
+                    if candidate.location:
+                        st.write(f"📍 {candidate.location}")
+
+                    # Show only highest education (deduplicated)
+                    st.markdown("**🎓 Highest Education:**")
+                    st.write(highest_edu or "Not specified")
+
+                with detail_col2:
+                    # Deduplicate matched skills for display
+                    unique_matched = list(set(candidate.matched_skills))
+                    st.markdown("**✅ Matched Skills:**")
+                    if unique_matched:
+                        st.write(", ".join(unique_matched[:12]))
+                        if len(unique_matched) > 12:
+                            st.caption(f"... and {len(unique_matched) - 12} more")
+                    else:
+                        st.write("No specific matches")
+
+                    # Deduplicate missing skills
+                    unique_missing = list(set(candidate.missing_skills))
+                    st.markdown("**❌ Missing Skills:**")
+                    if unique_missing:
+                        st.write(", ".join(unique_missing[:8]))
+                    else:
+                        st.write("None identified")
+
+                st.markdown("**💡 Recommendation:**")
+                st.info(candidate.recommendation)
+
+                # Deduplicate strengths
+                if candidate.strengths:
+                    unique_strengths = list(set(candidate.strengths))
+                    st.markdown("**✨ Strengths:**")
+                    for s in unique_strengths:
+                        st.write(f"• {s}")
+
+                # Deduplicate gaps
+                if candidate.gaps:
+                    unique_gaps = list(set(candidate.gaps))
+                    st.markdown("**⚠️ Gaps:**")
+                    for g in unique_gaps:
+                        st.write(f"• {g}")
+
+                st.caption(f"📁 File: {candidate.file_name} | ⏱️ Processed in {candidate.processing_time}s")
+
+
 # ═══════════════════════════════════════════
 #              SIDEBAR
 # ═══════════════════════════════════════════
 with st.sidebar:
     # ── Mode Toggle ──
     st.markdown("### 🔄 Processing Mode")
-    
+
     st.markdown('<div class="toggle-container">', unsafe_allow_html=True)
-    
+
     bulk_mode = st.toggle(
         "📚 Bulk Resume Mode (HR)",
         value=st.session_state.bulk_mode,
         key="bulk_mode_toggle",
         help="Enable to upload and compare multiple resumes against a single JD"
     )
-    
+
     if bulk_mode != st.session_state.bulk_mode:
         st.session_state.bulk_mode = bulk_mode
         # Reset relevant states when switching modes
@@ -474,7 +572,7 @@ with st.sidebar:
             st.session_state.bulk_results = None
             st.session_state.bulk_processing = False
         st.rerun()
-    
+
     if st.session_state.bulk_mode:
         st.markdown("""
             <p class="mode-description">
@@ -491,9 +589,9 @@ with st.sidebar:
                 🔧 Use 7 MCP tools
             </p>
         """, unsafe_allow_html=True)
-    
+
     st.markdown('</div>', unsafe_allow_html=True)
-    
+
     st.markdown("---")
 
     # ═══════════════════════════════════════════
@@ -505,13 +603,13 @@ with st.sidebar:
             <h4>📋 Job Description (Required)</h4>
             <p>Upload JD to compare resumes against</p>
         </div>""", unsafe_allow_html=True)
-        
+
         if not st.session_state.jd_loaded:
             jd_file = st.file_uploader(
                 "Upload JD", type=["pdf", "docx", "doc", "txt"],
                 label_visibility="collapsed", key="bulk_jd_uploader"
             )
-            
+
             if jd_file:
                 with st.spinner("📋 Processing JD..."):
                     jd_result = process_uploaded_file(jd_file, GROQ_API_KEY)
@@ -523,14 +621,14 @@ with st.sidebar:
                     st.rerun()
                 else:
                     st.error(f"❌ {jd_result['error']}")
-            
+
             jd_paste = st.text_area(
-                "Or paste JD text:", 
-                height=150, 
+                "Or paste JD text:",
+                height=150,
                 key="bulk_jd_paste",
                 placeholder="Paste job description here...",
             )
-            
+
             if jd_paste and len(jd_paste.strip()) > 50:
                 if st.button("✅ Use This JD", key="use_bulk_jd", use_container_width=True):
                     st.session_state.jd_text = jd_paste
@@ -553,19 +651,19 @@ with st.sidebar:
                     st.session_state.jd_file_info = None
                     st.session_state.bulk_results = None
                     st.rerun()
-            
+
             with st.expander("👁️ View JD"):
                 st.text_area("JD", st.session_state.jd_text[:3000], height=150, disabled=True, label_visibility="collapsed")
-        
+
         st.markdown("---")
-        
+
         # ── Bulk Resume Upload ──
         st.markdown("""<div class="bulk-upload-box">
             <h3>📚 Upload Multiple Resumes</h3>
             <p>Select multiple files (PDF, DOCX, TXT, Images)</p>
             <p>Up to 50 resumes at once</p>
         </div>""", unsafe_allow_html=True)
-        
+
         bulk_files = st.file_uploader(
             "Upload Resumes",
             type=["pdf", "docx", "doc", "txt", "jpg", "jpeg", "png", "webp"],
@@ -573,21 +671,21 @@ with st.sidebar:
             label_visibility="collapsed",
             key="bulk_resume_uploader"
         )
-        
+
         if bulk_files:
             st.info(f"📁 {len(bulk_files)} file(s) selected")
-            
+
             # Show first few files
             for f in bulk_files[:5]:
                 st.caption(f"📄 {f.name}")
             if len(bulk_files) > 5:
                 st.caption(f"... and {len(bulk_files) - 5} more")
-        
+
         st.markdown("---")
-        
+
         # ── Process Button ──
         can_process = st.session_state.jd_loaded and bulk_files and len(bulk_files) > 0
-        
+
         if st.button(
             "🚀 Process & Compare All Resumes",
             disabled=not can_process,
@@ -598,12 +696,12 @@ with st.sidebar:
             st.session_state.bulk_files = bulk_files
             st.session_state.bulk_processing = True
             st.rerun()
-        
+
         if not st.session_state.jd_loaded:
             st.warning("⚠️ Please upload a Job Description first")
         elif not bulk_files:
             st.info("📤 Upload resumes to compare")
-        
+
         # ── Clear Results ──
         if st.session_state.bulk_results:
             st.markdown("---")
@@ -638,11 +736,11 @@ with st.sidebar:
                     resume_file.seek(0)
                     raw_bytes = resume_file.read()
                     resume_file.seek(0)
-                    
+
                     st.session_state.raw_file_bytes = raw_bytes
                     st.session_state.raw_file_name = resume_file.name
                     st.session_state.raw_file_type = os.path.splitext(resume_file.name)[1].lower()
-                    
+
                     with st.spinner("📄 Processing document..."):
                         result = process_uploaded_file(resume_file, GROQ_API_KEY)
 
@@ -668,7 +766,7 @@ with st.sidebar:
                         st.error(f"❌ {result['error']}")
         else:
             fi = st.session_state.file_info
-            
+
             col_file, col_remove = st.columns([5, 1])
             with col_file:
                 st.success(f"✅ {fi['file_name']}")
@@ -689,13 +787,13 @@ with st.sidebar:
                     st.session_state.jd_loaded = False
                     st.session_state.jd_file_info = None
                     st.rerun()
-            
+
             st.caption(f"📊 {fi['file_size_kb']} KB · {fi['file_type'].upper().replace('.', '')}")
-            
+
             if st.button("👁️ View Full Resume", key="open_preview", use_container_width=True):
                 st.session_state.show_preview_modal = True
                 st.rerun()
-            
+
             if st.session_state.raw_file_bytes:
                 st.download_button(
                     label="📥 Download Resume",
@@ -777,13 +875,13 @@ with st.sidebar:
                         st.error(f"❌ {jd_result['error']}")
 
             jd_paste = st.text_area(
-                "Or paste JD text:", 
-                height=120, 
+                "Or paste JD text:",
+                height=120,
                 key="jd_paste_area",
                 placeholder="Paste job description here (optional)...",
                 max_chars=50000,
             )
-            
+
             if jd_paste and len(jd_paste.strip()) > 50:
                 if st.button("✅ Use This JD", key="use_pasted_jd", use_container_width=True):
                     st.session_state.jd_text = jd_paste
@@ -801,7 +899,7 @@ with st.sidebar:
             jd_info = st.session_state.jd_file_info or {}
             jd_name = jd_info.get("file_name", "Job Description")
             jd_size = jd_info.get("file_size_kb", 0)
-            
+
             col_jd, col_jd_remove = st.columns([5, 1])
             with col_jd:
                 st.success(f"✅ {jd_name}")
@@ -815,16 +913,16 @@ with st.sidebar:
                     if st.session_state.tool_registry:
                         st.session_state.tool_registry.set_jd_text("")
                     st.rerun()
-            
+
             if jd_size:
                 st.caption(f"📊 {jd_size} KB")
-            
+
             with st.expander("👁️ View Job Description"):
                 st.text_area(
-                    "JD Content", 
-                    st.session_state.jd_text, 
+                    "JD Content",
+                    st.session_state.jd_text,
                     height=200,
-                    disabled=True, 
+                    disabled=True,
                     label_visibility="collapsed"
                 )
 
@@ -926,7 +1024,7 @@ if not st.session_state.bulk_mode and st.session_state.show_preview_modal and st
     file_type = st.session_state.raw_file_type
     file_name = st.session_state.raw_file_name
     file_bytes = st.session_state.raw_file_bytes
-    
+
     header_col1, header_col2 = st.columns([8, 2])
     with header_col1:
         st.markdown(f"""
@@ -939,15 +1037,15 @@ if not st.session_state.bulk_mode and st.session_state.show_preview_modal and st
                 </h3>
             </div>
         """, unsafe_allow_html=True)
-    
+
     with header_col2:
         st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
         if st.button("❌ Close Preview", key="close_preview_btn", use_container_width=True):
             st.session_state.show_preview_modal = False
             st.rerun()
-    
+
     st.markdown('<div class="preview-body">', unsafe_allow_html=True)
-    
+
     if file_type in [".jpg", ".jpeg", ".png", ".webp"]:
         st.markdown('<div class="preview-image-container">', unsafe_allow_html=True)
         b64_img = base64.b64encode(file_bytes).decode()
@@ -965,17 +1063,17 @@ if not st.session_state.bulk_mode and st.session_state.show_preview_modal and st
             f'<div class="preview-text-content">{st.session_state.resume_text}</div>',
             unsafe_allow_html=True
         )
-    
+
     st.markdown('</div>', unsafe_allow_html=True)
-    
+
     st.markdown("---")
-    
+
     col_back1, col_back2, col_back3 = st.columns([1, 2, 1])
     with col_back2:
         if st.button("⬅️ Back to Chat", key="back_to_chat_btn", use_container_width=True):
             st.session_state.show_preview_modal = False
             st.rerun()
-    
+
     st.stop()
 
 
@@ -1023,23 +1121,23 @@ if not GROQ_API_KEY:
 # ═══════════════════════════════════════════
 
 if st.session_state.bulk_mode:
-    
+
     # ── Processing State ──
     if st.session_state.bulk_processing and st.session_state.bulk_files:
         st.markdown("### 🔄 Processing Resumes...")
-        
+
         progress_bar = st.progress(0)
         status_text = st.empty()
-        
+
         total_files = len(st.session_state.bulk_files)
-        
+
         def update_progress(current, total, message):
             progress_bar.progress(current / total)
             status_text.text(f"({current}/{total}) {message}")
-        
+
         # Process all resumes
         model_id = GROQ_MODELS[st.session_state.selected_model]["id"]
-        
+
         result = process_bulk_resumes(
             st.session_state.bulk_files,
             st.session_state.jd_text,
@@ -1047,24 +1145,24 @@ if st.session_state.bulk_mode:
             model_id,
             progress_callback=update_progress
         )
-        
+
         st.session_state.bulk_results = result
         st.session_state.bulk_processing = False
-        
+
         progress_bar.progress(1.0)
         status_text.text("✅ Processing complete!")
         time.sleep(0.5)
         st.rerun()
-    
+
     # ── Show Results ──
     elif st.session_state.bulk_results:
         result = st.session_state.bulk_results
-        
+
         # ── Summary Stats ──
         st.markdown("### 📊 Processing Summary")
-        
+
         col1, col2, col3, col4 = st.columns(4)
-        
+
         with col1:
             st.markdown(f"""
                 <div class="bulk-stats-card">
@@ -1072,7 +1170,7 @@ if st.session_state.bulk_mode:
                     <p>Total Resumes</p>
                 </div>
             """, unsafe_allow_html=True)
-        
+
         with col2:
             st.markdown(f"""
                 <div class="bulk-stats-card">
@@ -1080,7 +1178,7 @@ if st.session_state.bulk_mode:
                     <p>Successfully Processed</p>
                 </div>
             """, unsafe_allow_html=True)
-        
+
         with col3:
             avg_score = sum(c.overall_score for c in result.candidates if c.success) / max(result.successful, 1)
             st.markdown(f"""
@@ -1089,7 +1187,7 @@ if st.session_state.bulk_mode:
                     <p>Average Match Score</p>
                 </div>
             """, unsafe_allow_html=True)
-        
+
         with col4:
             st.markdown(f"""
                 <div class="bulk-stats-card">
@@ -1097,14 +1195,14 @@ if st.session_state.bulk_mode:
                     <p>Processing Time</p>
                 </div>
             """, unsafe_allow_html=True)
-        
+
         st.markdown("---")
-        
+
         # ── Export Buttons ──
         st.markdown("### 📥 Export Results")
-        
+
         export_col1, export_col2, export_col3 = st.columns(3)
-        
+
         with export_col1:
             excel_data = export_results_to_excel(result)
             st.download_button(
@@ -1114,7 +1212,7 @@ if st.session_state.bulk_mode:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
-        
+
         with export_col2:
             csv_data = export_results_to_csv(result)
             st.download_button(
@@ -1124,7 +1222,7 @@ if st.session_state.bulk_mode:
                 mime="text/csv",
                 use_container_width=True
             )
-        
+
         with export_col3:
             # JSON export
             json_data = pd.DataFrame([{
@@ -1136,7 +1234,7 @@ if st.session_state.bulk_mode:
                 "experience_score": c.experience_score,
                 "recommendation": c.recommendation
             } for c in result.candidates if c.success]).to_json(orient="records", indent=2)
-            
+
             st.download_button(
                 label="🔧 Download JSON",
                 data=json_data,
@@ -1144,12 +1242,12 @@ if st.session_state.bulk_mode:
                 mime="application/json",
                 use_container_width=True
             )
-        
+
         st.markdown("---")
-        
+
         # ── Ranked Candidates ──
         st.markdown("### 🏆 Ranked Candidates")
-        
+
         # Filter tabs
         tab_all, tab_excellent, tab_good, tab_moderate = st.tabs([
             f"📋 All ({result.successful})",
@@ -1157,117 +1255,19 @@ if st.session_state.bulk_mode:
             f"🟡 Good (65-79%)",
             f"🟠 Moderate (<65%)"
         ])
-        
-        # In the display_candidate_cards function, update the education display:
 
-def display_candidate_cards(candidates_list):
-    if not candidates_list:
-        st.info("No candidates in this category")
-        return
-    
-    for candidate in candidates_list:
-        if not candidate.success:
-            continue
-        
-        score_class = get_score_class(candidate.overall_score)
-        rank_class = get_rank_class(candidate.rank)
-        
-        # Get deduplicated highest education for display
-        highest_edu = candidate.highest_education
-        if len(highest_edu) > 80:
-            display_edu = highest_edu[:80] + "..."
-        else:
-            display_edu = highest_edu
-        
-        with st.container():
-            st.markdown(f"""
-                <div class="candidate-card">
-                    <div style="display: flex; align-items: center; margin-bottom: 12px;">
-                        <span class="candidate-rank {rank_class}">#{candidate.rank}</span>
-                        <div style="flex: 1;">
-                            <strong style="font-size: 1.1rem; color: #f1f5f9;">{candidate.candidate_name}</strong>
-                            <p style="margin: 2px 0; color: #94a3b8; font-size: 0.85rem;">
-                                {candidate.current_role} {f'at {candidate.current_company}' if candidate.current_company else ''}
-                            </p>
-                        </div>
-                        <span class="score-badge {score_class}">{candidate.overall_score}%</span>
-                    </div>
-                    <div class="score-breakdown">
-                        <span class="mini-score">🎯 Skills: {candidate.skills_score}%</span>
-                        <span class="mini-score">💼 Exp: {candidate.experience_score}%</span>
-                        <span class="mini-score">🎓 Edu: {candidate.education_score}%</span>
-                        <span class="mini-score">📍 Location: {candidate.location_score}%</span>
-                        <span class="mini-score">📅 {candidate.total_experience}y exp</span>
-                    </div>
-                </div>
-            """, unsafe_allow_html=True)
-            
-            with st.expander(f"📋 Details - {candidate.candidate_name}"):
-                detail_col1, detail_col2 = st.columns(2)
-                
-                with detail_col1:
-                    st.markdown("**📞 Contact:**")
-                    if candidate.email:
-                        st.write(f"📧 {candidate.email}")
-                    if candidate.phone:
-                        st.write(f"📱 {candidate.phone}")
-                    if candidate.location:
-                        st.write(f"📍 {candidate.location}")
-                    
-                    # Show only highest education (deduplicated)
-                    st.markdown("**🎓 Highest Education:**")
-                    st.write(highest_edu or "Not specified")
-                
-                with detail_col2:
-                    # Deduplicate matched skills for display
-                    unique_matched = list(set(candidate.matched_skills))
-                    st.markdown("**✅ Matched Skills:**")
-                    if unique_matched:
-                        st.write(", ".join(unique_matched[:12]))
-                        if len(unique_matched) > 12:
-                            st.caption(f"... and {len(unique_matched) - 12} more")
-                    else:
-                        st.write("No specific matches")
-                    
-                    # Deduplicate missing skills
-                    unique_missing = list(set(candidate.missing_skills))
-                    st.markdown("**❌ Missing Skills:**")
-                    if unique_missing:
-                        st.write(", ".join(unique_missing[:8]))
-                    else:
-                        st.write("None identified")
-                
-                st.markdown("**💡 Recommendation:**")
-                st.info(candidate.recommendation)
-                
-                # Deduplicate strengths
-                if candidate.strengths:
-                    unique_strengths = list(set(candidate.strengths))
-                    st.markdown("**✨ Strengths:**")
-                    for s in unique_strengths:
-                        st.write(f"• {s}")
-                
-                # Deduplicate gaps
-                if candidate.gaps:
-                    unique_gaps = list(set(candidate.gaps))
-                    st.markdown("**⚠️ Gaps:**")
-                    for g in unique_gaps:
-                        st.write(f"• {g}")
-                
-                st.caption(f"📁 File: {candidate.file_name} | ⏱️ Processed in {candidate.processing_time}s")
-        
         with tab_all:
             display_candidate_cards([c for c in result.candidates if c.success])
-        
+
         with tab_excellent:
             display_candidate_cards([c for c in result.candidates if c.success and c.overall_score >= 80])
-        
+
         with tab_good:
             display_candidate_cards([c for c in result.candidates if c.success and 65 <= c.overall_score < 80])
-        
+
         with tab_moderate:
             display_candidate_cards([c for c in result.candidates if c.success and c.overall_score < 65])
-        
+
         # ── Failed Files ──
         failed = [c for c in result.candidates if not c.success]
         if failed:
@@ -1275,37 +1275,37 @@ def display_candidate_cards(candidates_list):
             with st.expander(f"❌ Failed Files ({len(failed)})"):
                 for c in failed:
                     st.error(f"**{c.file_name}**: {c.error}")
-        
+
         # ── JD Requirements Summary ──
         st.markdown("---")
         with st.expander("📋 JD Requirements Analysis"):
             jd_summary = result.jd_summary
-            
+
             col_jd1, col_jd2 = st.columns(2)
-            
+
             with col_jd1:
                 st.markdown("**🎯 Required Skills Detected:**")
                 if jd_summary.get("required_skills"):
                     st.write(", ".join(jd_summary["required_skills"][:20]))
                 else:
                     st.write("None specifically identified")
-                
+
                 st.markdown("**📅 Experience Requirement:**")
                 st.write(f"{jd_summary.get('min_experience_years', 0)}+ years")
-            
+
             with col_jd2:
                 st.markdown("**🎓 Education Requirements:**")
                 if jd_summary.get("required_education"):
                     st.write(", ".join(jd_summary["required_education"][:10]))
                 else:
                     st.write("Not specified")
-                
+
                 st.markdown("**📍 Preferred Locations:**")
                 if jd_summary.get("preferred_locations"):
                     st.write(", ".join(jd_summary["preferred_locations"][:10]))
                 else:
                     st.write("Not specified")
-    
+
     # ── Welcome State (No results yet) ──
     else:
         st.markdown("""
