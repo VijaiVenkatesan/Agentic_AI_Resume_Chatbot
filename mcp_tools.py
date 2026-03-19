@@ -683,21 +683,25 @@ class ProfileSummaryTool(MCPTool):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#              TOOL 6: JD MATCHER (REQUIRES JD)
+#              TOOL 6: JD MATCHER (ENHANCED)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class JDMatcherTool(MCPTool):
     name = "jd_matcher"
-    description = "Compare resume against a Job Description. REQUIRES JD to be uploaded. Do NOT use without JD."
+    description = "Compare resume against a Job Description with detailed scoring. REQUIRES JD to be uploaded. Returns skills, experience, education, location, and overall match scores."
     parameters = [
         ToolParameter("jd_text", "string", "Job description text - REQUIRED for comparison")
     ]
 
     def __init__(self):
         self._parsed = {}
+        self._resume_text = ""
 
     def set_resume(self, p: Dict):
         self._parsed = p
+
+    def set_text(self, text: str):
+        self._resume_text = text
 
     def execute(self, **kwargs) -> ToolResult:
         start = time.time()
@@ -713,7 +717,9 @@ class JDMatcherTool(MCPTool):
             jd_lower = jd.lower()
             r = self._parsed
 
-            # Get candidate skills (deduplicated)
+            # ═══════════════════════════════════════
+            # SKILLS ANALYSIS
+            # ═══════════════════════════════════════
             all_skills = []
             skills_data = r.get("skills", {})
             if isinstance(skills_data, dict):
@@ -724,78 +730,196 @@ class JDMatcherTool(MCPTool):
                 all_skills.extend(s.lower() for s in skills_data)
             
             all_skills.extend(s.lower() for s in r.get("specializations", []))
-            all_skills = list(set(all_skills))  # Deduplicate
+            
+            # Add from work history
+            work_history = r.get("work_history", r.get("experience", []))
+            if isinstance(work_history, list):
+                for job in work_history:
+                    if isinstance(job, dict):
+                        techs = job.get("technologies_used", job.get("technologies", []))
+                        if isinstance(techs, list):
+                            all_skills.extend(t.lower() for t in techs)
+            
+            all_skills = list(set(all_skills))
 
             # Find skills mentioned in JD
-            skill_hits = [s for s in all_skills if any(w in jd_lower for w in s.split())]
+            skill_hits = []
+            for s in all_skills:
+                skill_words = s.split()
+                if any(w in jd_lower for w in skill_words if len(w) > 2):
+                    skill_hits.append(s)
+            
             skill_hits = _deduplicate_list(skill_hits)
-            skill_score = min(100, (len(skill_hits) / max(len(all_skills), 1)) * 150)
+            skill_score = min(100, (len(skill_hits) / max(len(all_skills), 1)) * 140)
 
-            # Experience comparison
+            # ═══════════════════════════════════════
+            # EXPERIENCE ANALYSIS
+            # ═══════════════════════════════════════
             exp = r.get("total_experience_years", 0)
+            try:
+                exp = float(exp)
+            except (ValueError, TypeError):
+                exp = 0
+            
             exp_matches = re.findall(r'(\d+)\+?\s*years?', jd_lower)
             exp_required = max([int(x) for x in exp_matches]) if exp_matches else 3
-            exp_score = min(100, (exp / max(exp_required, 1)) * 100)
+            
+            if exp >= exp_required:
+                exp_score = 100
+            elif exp > 0:
+                exp_score = min(95, (exp / max(exp_required, 1)) * 100)
+            else:
+                exp_score = 20
 
-            # Education check
+            # ═══════════════════════════════════════
+            # EDUCATION ANALYSIS
+            # ═══════════════════════════════════════
             edu = r.get("education", [])
             edu_keywords = ["bachelor", "master", "phd", "b.tech", "m.tech", "mba",
-                           "b.sc", "m.sc", "degree", "b.e", "m.e", "bca", "mca"]
-            edu_in_resume = any(
-                any(k in json.dumps(e).lower() for k in edu_keywords)
-                for e in edu if isinstance(e, dict)
-            ) if edu else False
+                           "b.sc", "m.sc", "degree", "b.e", "m.e", "bca", "mca",
+                           "graduate", "post-graduate", "diploma"]
+            
+            edu_in_resume = False
+            edu_level = 0
+            if isinstance(edu, list):
+                for e in edu:
+                    if isinstance(e, dict):
+                        edu_text = json.dumps(e).lower()
+                        for kw in edu_keywords:
+                            if kw in edu_text:
+                                edu_in_resume = True
+                                if kw in ["phd", "doctorate"]:
+                                    edu_level = max(edu_level, 5)
+                                elif kw in ["master", "mba", "m.tech", "m.sc", "m.e", "mca"]:
+                                    edu_level = max(edu_level, 4)
+                                elif kw in ["bachelor", "b.tech", "b.sc", "b.e", "bca", "degree", "graduate"]:
+                                    edu_level = max(edu_level, 3)
+                                elif kw == "diploma":
+                                    edu_level = max(edu_level, 2)
+            
             jd_needs_edu = any(k in jd_lower for k in edu_keywords)
-            edu_score = 90 if edu_in_resume else (60 if not jd_needs_edu else 30)
+            
+            if edu_in_resume:
+                edu_score = min(100, 70 + edu_level * 6)
+            else:
+                edu_score = 50 if not jd_needs_edu else 30
 
-            # Certifications
+            # ═══════════════════════════════════════
+            # LOCATION ANALYSIS (NEW)
+            # ═══════════════════════════════════════
+            candidate_location = (r.get("location", "") or r.get("address", "")).lower()
+            
+            # Extract locations from JD
+            location_patterns = [
+                r'\b(remote|hybrid|on-?site|work from home|wfh)\b',
+                r'\b(bangalore|bengaluru|hyderabad|chennai|mumbai|delhi|pune|noida|gurgaon|gurugram|kolkata)\b',
+                r'\b(new york|san francisco|seattle|austin|boston|chicago|los angeles|denver)\b',
+                r'\b(london|berlin|amsterdam|dublin|singapore|tokyo|sydney|toronto)\b',
+            ]
+            
+            jd_locations = []
+            for pattern in location_patterns:
+                matches = re.findall(pattern, jd_lower)
+                jd_locations.extend(matches)
+            
+            jd_locations = list(set(jd_locations))
+            
+            if not jd_locations:
+                location_score = 85  # No location requirement
+            elif "remote" in jd_locations or "work from home" in jd_locations:
+                location_score = 100  # Remote-friendly
+            elif candidate_location:
+                if any(loc in candidate_location for loc in jd_locations):
+                    location_score = 100
+                else:
+                    location_score = 55
+            else:
+                location_score = 50
+
+            # ═══════════════════════════════════════
+            # CERTIFICATIONS
+            # ═══════════════════════════════════════
             certs = r.get("certifications", [])
-            cert_score = min(100, len(certs) * 15) if certs else 20
+            cert_count = len(certs) if isinstance(certs, list) else 0
+            cert_score = min(100, cert_count * 18 + 20)
 
-            # Keyword overlap
+            # ═══════════════════════════════════════
+            # KEYWORD ANALYSIS
+            # ═══════════════════════════════════════
             resume_blob = r.get("professional_summary", r.get("summary", "")).lower()
-            work_history = r.get("work_history", r.get("experience", []))
             if isinstance(work_history, list):
                 for job in work_history:
                     if isinstance(job, dict):
                         resume_blob += " " + " ".join(job.get("key_achievements", job.get("highlights", []))).lower()
                         resume_blob += " " + " ".join(job.get("technologies_used", job.get("technologies", []))).lower()
             
-            jd_words = [w for w in set(re.findall(r'\b\w+\b', jd_lower)) if len(w) > 4 and w.isalpha()]
+            # Add full resume text
+            resume_blob += " " + self._resume_text.lower()
+            
+            jd_words = [w for w in set(re.findall(r'\b\w+\b', jd_lower)) 
+                       if len(w) > 4 and w.isalpha() and w not in 
+                       {'their', 'about', 'which', 'would', 'there', 'should', 'could'}]
             kw_hits = sum(1 for w in jd_words if w in resume_blob)
-            kw_score = min(100, (kw_hits / max(len(jd_words), 1)) * 200)
+            kw_score = min(100, (kw_hits / max(len(jd_words), 1)) * 180)
 
+            # ═══════════════════════════════════════
+            # OVERALL SCORE (Weighted)
+            # ═══════════════════════════════════════
             overall = round(
-                skill_score * 0.35 + exp_score * 0.25 +
-                edu_score * 0.10 + cert_score * 0.10 +
-                kw_score * 0.20, 1
+                skill_score * 0.35 +
+                exp_score * 0.25 +
+                edu_score * 0.12 +
+                location_score * 0.10 +
+                cert_score * 0.08 +
+                kw_score * 0.10,
+                1
             )
             overall = min(overall, 100)
 
+            # ═══════════════════════════════════════
+            # STRENGTHS & GAPS
+            # ═══════════════════════════════════════
             strengths, gaps = [], []
-            if skill_score >= 60:
+            
+            if skill_score >= 70:
                 strengths.append(f"Strong skill alignment ({skill_score:.0f}%)")
-            if exp_score >= 80:
-                strengths.append(f"Experience meets requirements ({exp}y vs {exp_required}y required)")
-            if cert_score >= 50:
-                strengths.append(f"Has {len(certs)} relevant certifications")
-            if kw_score >= 50:
-                strengths.append("Good keyword match with JD")
-
-            if skill_score < 40:
-                gaps.append("Skill gaps detected - review required skills")
-            if exp_score < 60:
+            elif skill_score < 45:
+                gaps.append("Significant skill gaps detected")
+            
+            if exp_score >= 85:
+                strengths.append(f"Experience exceeds requirements ({exp}y vs {exp_required}y)")
+            elif exp_score >= 70:
+                strengths.append(f"Experience meets requirements ({exp}y)")
+            elif exp_score < 60:
                 gaps.append(f"Experience gap ({exp}y vs {exp_required}y required)")
-            if not edu_in_resume and jd_needs_edu:
-                gaps.append("Education qualification may not match")
-            if kw_score < 30:
-                gaps.append("Low keyword overlap with JD")
+            
+            if edu_score >= 80:
+                strengths.append("Education qualifications match well")
+            elif edu_score < 50:
+                gaps.append("Education qualification concerns")
+            
+            if location_score >= 90:
+                strengths.append("Location compatible")
+            elif location_score < 60:
+                gaps.append("Location may not align with job requirements")
+            
+            if cert_count >= 2:
+                strengths.append(f"Has {cert_count} relevant certifications")
+            
+            if kw_score >= 60:
+                strengths.append("Good keyword/context match with JD")
+            elif kw_score < 35:
+                gaps.append("Low keyword overlap - consider tailoring resume")
 
+            # ═══════════════════════════════════════
+            # RECOMMENDATION
+            # ═══════════════════════════════════════
             recommendation = (
-                "🟢 Strong fit — highly recommended" if overall >= 75 else
-                "🟡 Good fit with some gaps — worth considering" if overall >= 55 else
-                "🟠 Moderate fit — may need upskilling" if overall >= 35 else
-                "🔴 Low fit for this specific role"
+                "🟢 Excellent Match — Highly Recommended" if overall >= 80 else
+                "🟡 Good Match — Worth Considering" if overall >= 65 else
+                "🟠 Moderate Match — Review Needed" if overall >= 50 else
+                "🔴 Below Average — Significant Gaps" if overall >= 35 else
+                "⚫ Low Match — May Not Fit"
             )
 
             return ToolResult(self.name, True, {
@@ -805,19 +929,27 @@ class JDMatcherTool(MCPTool):
                     "skills_match": round(skill_score, 1),
                     "experience_match": round(exp_score, 1),
                     "education_match": round(edu_score, 1),
+                    "location_match": round(location_score, 1),
                     "certifications_match": round(cert_score, 1),
                     "keyword_match": round(kw_score, 1),
                 },
                 "matched_skills": skill_hits[:15],
+                "total_skills_found": len(all_skills),
                 "experience_comparison": {
                     "candidate_years": exp,
                     "jd_requirement_years": exp_required
                 },
+                "location_analysis": {
+                    "candidate_location": r.get("location", "") or r.get("address", ""),
+                    "jd_locations": jd_locations,
+                    "score": round(location_score, 1)
+                },
                 "strengths": _deduplicate_list(strengths),
                 "gaps": _deduplicate_list(gaps),
                 "recommendation": recommendation,
-                "note": "Comparison based on uploaded JD and resume data only"
+                "note": "Comparison based on uploaded JD and resume data"
             }, execution_time=round(time.time() - start, 3))
+            
         except Exception as e:
             return ToolResult(self.name, False, None, error=str(e),
                             execution_time=round(time.time() - start, 3))
