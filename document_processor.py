@@ -1,6 +1,6 @@
 """
 Universal Document Processor - Enhanced V2
-Handles: PDF, DOCX, TXT, Images (JPG, PNG, JPEG, WEBP)
+Handles: PDF, DOCX, DOC, TXT, Images (JPG, PNG, JPEG, WEBP)
 Enhanced for complex layouts, multi-column PDFs, creative formats
 Improved contact and name extraction
 """
