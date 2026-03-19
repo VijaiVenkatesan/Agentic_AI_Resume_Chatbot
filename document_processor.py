@@ -284,6 +284,255 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════
+#                    DOC FILE EXTRACTION (NEW)
+# ═══════════════════════════════════════════════════════════════
+
+def extract_text_from_doc(file_bytes: bytes) -> str:
+    """
+    Extract text from legacy .DOC files (Microsoft Word 97-2003)
+    Uses multiple methods for maximum compatibility
+    """
+    text = ""
+    
+    # Method 1: Try using python-docx (sometimes works with .doc)
+    try:
+        from docx import Document
+        doc = Document(io.BytesIO(file_bytes))
+        text_parts = []
+        for para in doc.paragraphs:
+            if para.text.strip():
+                text_parts.append(para.text.strip())
+        for table in doc.tables:
+            for row in table.rows:
+                row_text = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                if row_text:
+                    text_parts.append(" | ".join(row_text))
+        text = "\n".join(text_parts)
+        if text and len(text.strip()) > 50:
+            return _clean_extracted_text(text)
+    except Exception:
+        pass
+    
+    # Method 2: Try antiword via subprocess (Linux/Mac)
+    try:
+        import subprocess
+        import tempfile
+        import os
+        
+        # Write bytes to temp file
+        with tempfile.NamedTemporaryFile(suffix='.doc', delete=False) as tmp:
+            tmp.write(file_bytes)
+            tmp_path = tmp.name
+        
+        try:
+            # Try antiword
+            result = subprocess.run(
+                ['antiword', tmp_path],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                text = result.stdout
+                if len(text.strip()) > 50:
+                    return _clean_extracted_text(text)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        finally:
+            # Clean up temp file
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
+    except Exception:
+        pass
+    
+    # Method 3: Try catdoc via subprocess (Linux/Mac)
+    try:
+        import subprocess
+        import tempfile
+        import os
+        
+        with tempfile.NamedTemporaryFile(suffix='.doc', delete=False) as tmp:
+            tmp.write(file_bytes)
+            tmp_path = tmp.name
+        
+        try:
+            result = subprocess.run(
+                ['catdoc', tmp_path],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                text = result.stdout
+                if len(text.strip()) > 50:
+                    return _clean_extracted_text(text)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
+    except Exception:
+        pass
+    
+    # Method 4: Try olefile to extract raw text (works on most .doc files)
+    try:
+        import olefile
+        
+        ole = olefile.OleFileIO(io.BytesIO(file_bytes))
+        
+        # Try to get WordDocument stream
+        if ole.exists('WordDocument'):
+            # Extract text from various streams
+            text_parts = []
+            
+            # Try to get text from different streams
+            streams_to_try = [
+                'WordDocument',
+                '1Table',
+                '0Table',
+                'Data',
+            ]
+            
+            for stream_name in streams_to_try:
+                if ole.exists(stream_name):
+                    try:
+                        stream_data = ole.openstream(stream_name).read()
+                        # Extract printable ASCII/Unicode text
+                        extracted = _extract_text_from_binary(stream_data)
+                        if extracted:
+                            text_parts.append(extracted)
+                    except:
+                        pass
+            
+            text = "\n".join(text_parts)
+            ole.close()
+            
+            if text and len(text.strip()) > 50:
+                return _clean_extracted_text(text)
+        
+        ole.close()
+    except ImportError:
+        pass
+    except Exception:
+        pass
+    
+    # Method 5: Raw binary text extraction (last resort)
+    try:
+        text = _extract_text_from_binary(file_bytes)
+        if text and len(text.strip()) > 50:
+            return _clean_extracted_text(text)
+    except Exception:
+        pass
+    
+    # Method 6: Try textract if available
+    try:
+        import textract
+        import tempfile
+        import os
+        
+        with tempfile.NamedTemporaryFile(suffix='.doc', delete=False) as tmp:
+            tmp.write(file_bytes)
+            tmp_path = tmp.name
+        
+        try:
+            text = textract.process(tmp_path).decode('utf-8', errors='ignore')
+            if len(text.strip()) > 50:
+                return _clean_extracted_text(text)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
+    except ImportError:
+        pass
+    except Exception:
+        pass
+    
+    return text if text else "Error: Could not extract text from .DOC file. Please convert to .DOCX or PDF format."
+
+
+def _extract_text_from_binary(data: bytes) -> str:
+    """
+    Extract readable text from binary data
+    Handles both ASCII and Unicode text embedded in binary files
+    """
+    text_parts = []
+    
+    # Extract ASCII text (sequences of printable characters)
+    ascii_pattern = rb'[\x20-\x7E]{4,}'
+    ascii_matches = re.findall(ascii_pattern, data)
+    for match in ascii_matches:
+        try:
+            decoded = match.decode('ascii', errors='ignore')
+            # Filter out garbage
+            if _is_meaningful_text(decoded):
+                text_parts.append(decoded)
+        except:
+            pass
+    
+    # Extract UTF-16 text (common in .doc files)
+    try:
+        # UTF-16 LE (Little Endian) - most common in Windows
+        utf16_text = data.decode('utf-16-le', errors='ignore')
+        # Filter to printable characters
+        cleaned = ''.join(c if c.isprintable() or c in '\n\r\t' else ' ' for c in utf16_text)
+        # Find meaningful sequences
+        sequences = re.findall(r'[\w\s@.,;:!?()\-]{5,}', cleaned)
+        for seq in sequences:
+            if _is_meaningful_text(seq):
+                text_parts.append(seq)
+    except:
+        pass
+    
+    # Join and clean
+    full_text = ' '.join(text_parts)
+    
+    # Remove excessive whitespace
+    full_text = re.sub(r'\s+', ' ', full_text)
+    
+    # Try to reconstruct lines
+    full_text = re.sub(r'([.!?])\s+([A-Z])', r'\1\n\2', full_text)
+    
+    return full_text.strip()
+
+
+def _is_meaningful_text(text: str) -> bool:
+    """Check if extracted text is meaningful (not garbage)"""
+    if not text or len(text) < 4:
+        return False
+    
+    # Count letters vs other characters
+    letters = sum(1 for c in text if c.isalpha())
+    total = len(text)
+    
+    # Should be at least 50% letters
+    if letters / total < 0.4:
+        return False
+    
+    # Should not be repetitive
+    if len(set(text.lower())) < len(text) * 0.3:
+        return False
+    
+    # Check for common garbage patterns
+    garbage_patterns = [
+        r'^[A-Z]{20,}$',  # All caps long string
+        r'^[a-z]{20,}$',  # All lowercase long string
+        r'^\d+$',  # Only digits
+        r'^[\W_]+$',  # Only special characters
+    ]
+    
+    for pattern in garbage_patterns:
+        if re.match(pattern, text):
+            return False
+    
+    return True
+
+
+# ═══════════════════════════════════════════════════════════════
 #                    ENHANCED TXT EXTRACTION
 # ═══════════════════════════════════════════════════════════════
 
@@ -817,14 +1066,17 @@ def process_uploaded_file(uploaded_file, groq_api_key: str = "") -> Dict:
         "error": None,
         "file_bytes": file_bytes,
         "preview": get_file_preview_data(file_bytes, file_name),
-        "extracted_contacts": {},  # NEW: Pre-extracted contacts
+        "extracted_contacts": {},
     }
 
     try:
         if ext == ".pdf":
             result["text"] = extract_text_from_pdf(file_bytes)
-        elif ext in [".docx", ".doc"]:
+        elif ext == ".docx":
             result["text"] = extract_text_from_docx(file_bytes)
+        elif ext == ".doc":
+            # Handle legacy .DOC format
+            result["text"] = extract_text_from_doc(file_bytes)
         elif ext in [".txt", ".text", ".md"]:
             result["text"] = extract_text_from_txt(file_bytes)
         elif ext in [".jpg", ".jpeg", ".png", ".webp"]:
@@ -837,12 +1089,16 @@ def process_uploaded_file(uploaded_file, groq_api_key: str = "") -> Dict:
             return result
 
         if result["text"] and len(result["text"].strip()) > 30:
-            result["success"] = True
-            
-            # Pre-extract contacts for better parsing
-            result["extracted_contacts"] = extract_contacts_from_text(result["text"])
+            # Check for extraction error messages
+            if result["text"].startswith("Error:"):
+                result["error"] = result["text"]
+                result["success"] = False
+            else:
+                result["success"] = True
+                # Pre-extract contacts for better parsing
+                result["extracted_contacts"] = extract_contacts_from_text(result["text"])
         else:
-            result["error"] = "Could not extract sufficient text. Try different format."
+            result["error"] = "Could not extract sufficient text. Try converting to PDF or DOCX format."
 
     except Exception as e:
         result["error"] = str(e)
