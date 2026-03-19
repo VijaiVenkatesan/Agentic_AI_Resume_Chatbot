@@ -956,12 +956,12 @@ class JDMatcherTool(MCPTool):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#              TOOL 7: EDUCATION EXTRACTOR
+#              TOOL 7: EDUCATION EXTRACTOR (NO HALLUCINATION)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class EducationExtractorTool(MCPTool):
     name = "education_extractor"
-    description = "Extract education details from resume. Returns ONLY education information found in the resume."
+    description = "Extract education details from resume. Returns ONLY education information actually found in the resume. No hallucination."
     parameters = [
         ToolParameter("include_certifications", "boolean", "Include certifications", False, True)
     ]
@@ -976,167 +976,242 @@ class EducationExtractorTool(MCPTool):
     def set_text(self, text: str):
         self._resume_text = text
 
-    def _extract_education_from_text(self, text: str) -> List[Dict]:
-        """Extract education directly from text using patterns"""
-        education = []
+    def _normalize_degree(self, degree: str) -> str:
+        """Normalize degree name for comparison"""
+        if not degree:
+            return ""
         
-        degree_patterns = [
-            (r'(Bachelor[\'s]?\s*(?:of\s*)?(?:Science|Arts|Technology|Engineering|Commerce|Business Administration)?)', 'Bachelor'),
-            (r'(B\.?\s*(?:Tech|E|Sc|A|Com|B\.?A|S|CA|BA)\.?)', 'Bachelor'),
-            (r'(Master[\'s]?\s*(?:of\s*)?(?:Science|Arts|Technology|Engineering|Business Administration)?)', 'Master'),
-            (r'(M\.?\s*(?:Tech|E|Sc|A|B\.?A|S|CA|BA)\.?|MBA)', 'Master'),
-            (r'(Ph\.?\s*D\.?|Doctorate)', 'PhD'),
-            (r'(Diploma)', 'Diploma'),
-            (r'(Higher\s*Secondary|HSC|12th|XII|Intermediate)', 'School'),
-            (r'(Secondary|SSC|10th|X|Matriculation)', 'School'),
+        degree_lower = degree.lower().strip()
+        
+        # Normalize common variations
+        normalizations = {
+            r'b\.?tech|bachelor\s*of\s*technology|btech': 'btech',
+            r'm\.?tech|master\s*of\s*technology|mtech': 'mtech',
+            r'b\.?e\.?|bachelor\s*of\s*engineering': 'be',
+            r'm\.?e\.?|master\s*of\s*engineering': 'me',
+            r'b\.?sc\.?|bachelor\s*of\s*science|bsc': 'bsc',
+            r'm\.?sc\.?|master\s*of\s*science|msc': 'msc',
+            r'b\.?a\.?|bachelor\s*of\s*arts': 'ba',
+            r'm\.?a\.?|master\s*of\s*arts': 'ma',
+            r'b\.?com\.?|bachelor\s*of\s*commerce|bcom': 'bcom',
+            r'm\.?com\.?|master\s*of\s*commerce|mcom': 'mcom',
+            r'b\.?c\.?a\.?|bachelor\s*of\s*computer\s*applications?|bca': 'bca',
+            r'm\.?c\.?a\.?|master\s*of\s*computer\s*applications?|mca': 'mca',
+            r'b\.?b\.?a\.?|bachelor\s*of\s*business\s*administration|bba': 'bba',
+            r'm\.?b\.?a\.?|master\s*of\s*business\s*administration|mba': 'mba',
+            r'ph\.?d\.?|doctorate|doctor\s*of\s*philosophy': 'phd',
+        }
+        
+        for pattern, replacement in normalizations.items():
+            if re.search(pattern, degree_lower):
+                return replacement
+        
+        return re.sub(r'[^a-z0-9]', '', degree_lower)
+
+    def _is_valid_education_entry(self, edu: Dict) -> bool:
+        """Check if education entry has valid, non-placeholder data"""
+        if not isinstance(edu, dict):
+            return False
+        
+        degree = str(edu.get("degree", "")).strip().lower()
+        institution = str(edu.get("institution", "") or edu.get("university", "") or edu.get("college", "")).strip().lower()
+        
+        # Invalid/placeholder values
+        invalid_values = [
+            '', 'n/a', 'na', 'none', 'null', 'unknown', 'not specified',
+            'your degree', 'degree name', 'enter degree', 'degree here',
+            'your university', 'university name', 'enter university',
+            'school name', 'college name', 'institution name',
+            '-', '—', 'tbd', 'pending', 'xxx', '000',
         ]
         
-        institution_patterns = [
-            r'([A-Z][A-Za-z\s\.]+(?:University|College|Institute|School|Academy))',
-            r'((?:IIT|NIT|IIIT|BITS|VIT|SRM)\s*[\w\s]*)',
-        ]
+        if degree in invalid_values:
+            return False
         
-        gpa_patterns = [
-            r'(?:GPA|CGPA|CPI)[:\s]*(\d+\.?\d*)',
-            r'(\d{1,2}(?:\.\d+)?)\s*%',
-        ]
+        # Must have at least a degree name with 2+ characters
+        if len(degree) < 2:
+            return False
         
-        year_patterns = [
-            r'((?:19|20)\d{2})\s*[-–to]+\s*((?:19|20)\d{2}|Present|Current)',
-            r'((?:19|20)\d{2})',
-        ]
+        # Check for garbage/random characters
+        alpha_count = sum(1 for c in degree if c.isalpha())
+        if alpha_count < len(degree) * 0.5:
+            return False
         
-        for pattern, degree_type in degree_patterns:
-            for match in re.finditer(pattern, text, re.IGNORECASE):
-                degree_name = match.group(1).strip()
-                
-                start = max(0, match.start() - 50)
-                end = min(len(text), match.end() + 200)
-                context = text[start:end]
-                
-                edu_entry = {
-                    "degree": degree_name,
-                    "degree_type": degree_type,
-                    "institution": "",
-                    "year": "",
-                    "gpa": "",
-                }
-                
-                for inst_pattern in institution_patterns:
-                    inst_match = re.search(inst_pattern, context)
-                    if inst_match:
-                        inst = inst_match.group(1).strip()
-                        if len(inst) > 5:
-                            edu_entry["institution"] = inst
-                            break
-                
-                for year_pattern in year_patterns:
-                    year_match = re.search(year_pattern, context, re.IGNORECASE)
-                    if year_match:
-                        edu_entry["year"] = year_match.group(0)
-                        break
-                
-                for gpa_pattern in gpa_patterns:
-                    gpa_match = re.search(gpa_pattern, context, re.IGNORECASE)
-                    if gpa_match:
-                        edu_entry["gpa"] = gpa_match.group(0)
-                        break
-                
-                education.append(edu_entry)
+        return True
+
+    def _deduplicate_education(self, education_list: List[Dict]) -> List[Dict]:
+        """Remove duplicate education entries"""
+        if not education_list:
+            return []
         
-        return education
+        seen = set()
+        unique = []
+        
+        for edu in education_list:
+            if not self._is_valid_education_entry(edu):
+                continue
+            
+            degree = str(edu.get("degree", "")).strip()
+            institution = str(edu.get("institution", "") or edu.get("university", "") or edu.get("college", "")).strip()
+            
+            # Create normalized key
+            degree_norm = self._normalize_degree(degree)
+            inst_norm = re.sub(r'[^a-z0-9]', '', institution.lower())[:30]
+            
+            key = f"{degree_norm}_{inst_norm}"
+            
+            if key in seen:
+                continue
+            
+            seen.add(key)
+            unique.append(edu)
+        
+        return unique
+
+    def _deduplicate_certifications(self, cert_list: List) -> List[Dict]:
+        """Remove duplicate certifications"""
+        if not cert_list:
+            return []
+        
+        seen = set()
+        unique = []
+        
+        for cert in cert_list:
+            if isinstance(cert, dict):
+                name = str(cert.get("name", "")).strip()
+            elif isinstance(cert, str):
+                name = cert.strip()
+            else:
+                continue
+            
+            if not name or len(name) < 2:
+                continue
+            
+            # Invalid values
+            if name.lower() in ['n/a', 'na', 'none', 'null', '-', '—', 'unknown']:
+                continue
+            
+            # Normalize for comparison
+            name_norm = re.sub(r'[^a-z0-9]', '', name.lower())[:50]
+            
+            if name_norm in seen:
+                continue
+            
+            seen.add(name_norm)
+            
+            if isinstance(cert, dict):
+                unique.append(cert)
+            else:
+                unique.append({"name": name})
+        
+        return unique
+
+    def _get_highest_degree(self, education_list: List[Dict]) -> str:
+        """Determine the highest degree from the list"""
+        degree_priority = {
+            "phd": 10, "ph.d": 10, "doctorate": 10, "doctor": 10,
+            "master": 8, "mba": 8, "m.tech": 8, "mtech": 8, "m.e": 8, "m.sc": 8, "mca": 8,
+            "bachelor": 6, "b.tech": 6, "btech": 6, "b.e": 6, "b.sc": 6, "bca": 6, "bba": 6,
+            "associate": 4,
+            "diploma": 3, "polytechnic": 3,
+            "12th": 2, "hsc": 2, "higher secondary": 2,
+            "10th": 1, "ssc": 1, "secondary": 1, "matriculation": 1,
+        }
+        
+        highest = ""
+        highest_priority = -1
+        
+        for edu in education_list:
+            if not isinstance(edu, dict):
+                continue
+            
+            degree = str(edu.get("degree", "")).lower()
+            
+            for key, priority in degree_priority.items():
+                if key in degree:
+                    if priority > highest_priority:
+                        highest_priority = priority
+                        highest = edu.get("degree", "")
+                    break
+        
+        return highest
 
     def execute(self, **kwargs) -> ToolResult:
         start = time.time()
         include_certs = kwargs.get("include_certifications", True)
 
         try:
-            # Get from parsed resume
+            # ═══════════════════════════════════════
+            # STEP 1: Get education from parsed resume
+            # ═══════════════════════════════════════
             education_list = []
             edu_data = self._parsed.get("education", [])
+            
             if isinstance(edu_data, list):
                 education_list = edu_data
             elif isinstance(edu_data, dict):
                 education_list = [edu_data]
             
-            # Also extract from text
-            text_education = []
-            if self._resume_text:
-                text_education = self._extract_education_from_text(self._resume_text)
+            # ═══════════════════════════════════════
+            # STEP 2: Deduplicate and validate
+            # ═══════════════════════════════════════
+            unique_education = self._deduplicate_education(education_list)
             
-            # Merge and deduplicate
-            all_education = []
-            seen = set()
+            # ═══════════════════════════════════════
+            # STEP 3: Format education entries
+            # ═══════════════════════════════════════
+            formatted_education = []
+            for edu in unique_education:
+                formatted_entry = {
+                    "degree": edu.get("degree", ""),
+                    "field": edu.get("field", "") or edu.get("major", "") or edu.get("branch", "") or edu.get("specialization", ""),
+                    "institution": edu.get("institution", "") or edu.get("university", "") or edu.get("college", ""),
+                    "location": edu.get("location", ""),
+                    "year": edu.get("year", "") or edu.get("end_year", "") or edu.get("graduation_year", ""),
+                    "start_year": edu.get("start_year", ""),
+                    "gpa": edu.get("gpa", "") or edu.get("cgpa", "") or edu.get("grade", "") or edu.get("percentage", ""),
+                    "achievements": edu.get("achievements", []) if isinstance(edu.get("achievements"), list) else []
+                }
+                
+                # Only add if we have at least degree or institution
+                if formatted_entry["degree"] or formatted_entry["institution"]:
+                    formatted_education.append(formatted_entry)
             
-            for edu in education_list + text_education:
-                if not isinstance(edu, dict):
-                    continue
-                
-                degree = edu.get("degree", edu.get("title", ""))
-                institution = edu.get("institution", edu.get("university", edu.get("school", edu.get("college", ""))))
-                
-                key = f"{degree}_{institution}".lower()[:60]
-                if key in seen or not (degree or institution):
-                    continue
-                seen.add(key)
-                
-                all_education.append({
-                    "degree": degree,
-                    "field": edu.get("field", edu.get("major", edu.get("specialization", edu.get("branch", "")))),
-                    "institution": institution,
-                    "year": edu.get("year", edu.get("graduation_year", edu.get("end_date", edu.get("end_year", "")))),
-                    "gpa": edu.get("gpa", edu.get("cgpa", edu.get("grade", edu.get("percentage", "")))),
-                    "location": edu.get("location", "")
-                })
-            
-            # Get certifications (deduplicated)
+            # ═══════════════════════════════════════
+            # STEP 4: Get certifications (deduplicated)
+            # ═══════════════════════════════════════
             certifications = []
             if include_certs:
                 certs = self._parsed.get("certifications", [])
-                if isinstance(certs, list):
-                    seen_certs = set()
-                    for cert in certs:
-                        if isinstance(cert, dict):
-                            cert_name = cert.get("name", "").lower()
-                            if cert_name and cert_name not in seen_certs:
-                                seen_certs.add(cert_name)
-                                certifications.append(cert)
-                        elif isinstance(cert, str):
-                            cert_lower = cert.lower()
-                            if cert_lower and cert_lower not in seen_certs:
-                                seen_certs.add(cert_lower)
-                                certifications.append({"name": cert})
+                certifications = self._deduplicate_certifications(certs)
             
-            # Determine highest degree
-            degree_rank = {
-                "phd": 5, "doctorate": 5,
-                "master": 4, "mba": 4, "m.tech": 4, "mtech": 4, "m.e": 4, "m.sc": 4, "mca": 4,
-                "bachelor": 3, "b.tech": 3, "btech": 3, "b.e": 3, "b.sc": 3, "bca": 3, "b.com": 3,
-                "diploma": 2,
-                "school": 1, "secondary": 1, "12th": 1, "hsc": 1
+            # ═══════════════════════════════════════
+            # STEP 5: Determine highest degree
+            # ═══════════════════════════════════════
+            highest_degree = self._get_highest_degree(formatted_education)
+            
+            # ═══════════════════════════════════════
+            # STEP 6: Build response
+            # ═══════════════════════════════════════
+            result_data = {
+                "candidate_name": self._parsed.get("name", ""),
+                "education": formatted_education,
+                "highest_degree": highest_degree,
+                "total_qualifications": len(formatted_education),
+                "certifications": certifications,
+                "total_certifications": len(certifications),
             }
             
-            highest_degree = ""
-            highest_rank = 0
-            for edu in all_education:
-                degree_lower = edu.get("degree", "").lower()
-                for deg, rank in degree_rank.items():
-                    if deg in degree_lower and rank > highest_rank:
-                        highest_rank = rank
-                        highest_degree = edu.get("degree", "")
-
+            # Add note based on what was found
+            if not formatted_education:
+                result_data["note"] = "No education details found in the resume."
+            else:
+                result_data["note"] = "Education data extracted directly from resume. No fabricated information."
+            
             return ToolResult(
                 self.name, True,
-                {
-                    "education": all_education,
-                    "highest_degree": highest_degree,
-                    "total_qualifications": len(all_education),
-                    "certifications": certifications,
-                    "total_certifications": len(certifications),
-                    "candidate_name": self._parsed.get("name", ""),
-                    "note": "All education data extracted directly from resume"
-                },
-                metadata={"edu_count": len(all_education), "cert_count": len(certifications)},
+                result_data,
+                metadata={"edu_count": len(formatted_education), "cert_count": len(certifications)},
                 execution_time=round(time.time() - start, 3)
             )
             
