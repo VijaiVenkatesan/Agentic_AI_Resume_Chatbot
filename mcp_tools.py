@@ -658,12 +658,12 @@ class CoverLetterTool(MCPTool):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#              TOOL 5: PROFILE SUMMARY
+#              TOOL 5: PROFILE SUMMARY (NO HALLUCINATION)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class ProfileSummaryTool(MCPTool):
     name = "profile_summary"
-    description = "Extract profile summary and contact info. Returns ONLY data from the resume."
+    description = "Extract profile summary and contact info. Returns ONLY data actually found in the resume - no hallucination."
     parameters = [
         ToolParameter("context", "string",
                       "Context: linkedin, portfolio, elevator_pitch, detailed", False, "detailed")
@@ -675,10 +675,50 @@ class ProfileSummaryTool(MCPTool):
     def set_resume(self, p: Dict):
         self._parsed = p
 
+    def _deduplicate_list(self, items: List) -> List:
+        """Remove duplicates while preserving order"""
+        if not items:
+            return []
+        
+        seen = set()
+        unique = []
+        
+        for item in items:
+            if not item:
+                continue
+            
+            if isinstance(item, dict):
+                # For dicts like certifications
+                item_key = str(item.get("name", "")).lower().strip()
+            else:
+                item_key = str(item).lower().strip()
+            
+            if item_key and item_key not in seen and item_key not in ['n/a', 'na', 'none', 'null', '-', '—']:
+                seen.add(item_key)
+                unique.append(item)
+        
+        return unique
+
+    def _clean_value(self, value: str) -> str:
+        """Return empty string for invalid/placeholder values"""
+        if not value:
+            return ""
+        
+        value_str = str(value).strip()
+        invalid = ['n/a', 'na', 'none', 'null', '-', '—', 'unknown', 'not specified', 
+                   'your name', 'your email', 'your phone', 'enter here', 'xxx', '000']
+        
+        if value_str.lower() in invalid:
+            return ""
+        
+        return value_str
+
     def execute(self, **kwargs) -> ToolResult:
         start = time.time()
         try:
             r = self._parsed
+            
+            # Get skills (deduplicated)
             all_skills = []
             skills_data = r.get("skills", {})
             if isinstance(skills_data, dict):
@@ -688,45 +728,62 @@ class ProfileSummaryTool(MCPTool):
             elif isinstance(skills_data, list):
                 all_skills = skills_data
             
-            all_skills = _deduplicate_list(all_skills)
+            all_skills = self._deduplicate_list(all_skills)
 
-            # Deduplicate certifications
+            # Get certifications (deduplicated)
             certs = r.get("certifications", [])
-            if isinstance(certs, list):
-                seen_certs = set()
-                unique_certs = []
-                for cert in certs:
-                    if isinstance(cert, dict):
-                        cert_name = cert.get("name", "").lower()
-                    else:
-                        cert_name = str(cert).lower()
-                    if cert_name and cert_name not in seen_certs:
-                        seen_certs.add(cert_name)
-                        unique_certs.append(cert)
-                certs = unique_certs[:5]
+            certs = self._deduplicate_list(certs)[:10]  # Limit to top 10
 
-            return ToolResult(self.name, True, {
-                "name": r.get("name", ""),
+            # Get education (deduplicated)
+            education = r.get("education", [])
+            education = self._deduplicate_list(education)
+
+            # Clean all contact values
+            name = self._clean_value(r.get("name", ""))
+            email = self._clean_value(r.get("email", ""))
+            phone = self._clean_value(r.get("phone", ""))
+            address = self._clean_value(r.get("address", "")) or self._clean_value(r.get("location", ""))
+            linkedin = self._clean_value(r.get("linkedin", ""))
+            github = self._clean_value(r.get("github", ""))
+            portfolio = self._clean_value(r.get("portfolio", ""))
+            
+            current_role = self._clean_value(r.get("current_role", ""))
+            current_company = self._clean_value(r.get("current_company", ""))
+            summary = self._clean_value(r.get("professional_summary", "")) or self._clean_value(r.get("summary", ""))
+            
+            experience = r.get("total_experience_years", 0)
+            try:
+                experience = float(experience)
+            except:
+                experience = 0
+
+            result_data = {
+                "name": name if name else "Not found in resume",
                 "context": kwargs.get("context", "detailed"),
-                "experience_years": r.get("total_experience_years", 0),
-                "current_role": r.get("current_role", ""),
-                "current_company": r.get("current_company", ""),
-                "summary": r.get("professional_summary", r.get("summary", "")),
-                "specializations": _deduplicate_list(r.get("specializations", [])),
-                "top_skills": all_skills[:12],
-                "education": r.get("education", []),
+                "experience_years": experience,
+                "current_role": current_role if current_role else "Not specified",
+                "current_company": current_company if current_company else "Not specified",
+                "summary": summary if summary else "No professional summary found in resume",
+                "specializations": self._deduplicate_list(r.get("specializations", [])),
+                "top_skills": all_skills[:15] if all_skills else [],
+                "education": education,
                 "certifications": certs,
-                "awards": r.get("awards", []),
+                "awards": self._deduplicate_list(r.get("awards", [])),
                 "contact": {
-                    "email": r.get("email", ""),
-                    "phone": r.get("phone", ""),
-                    "address": r.get("address", r.get("location", "")),
-                    "linkedin": r.get("linkedin", ""),
-                    "github": r.get("github", ""),
-                    "portfolio": r.get("portfolio", ""),
+                    "email": email if email else "Not found",
+                    "phone": phone if phone else "Not found",
+                    "address": address if address else "Not found",
+                    "linkedin": linkedin if linkedin else "Not found",
+                    "github": github if github else "Not found",
+                    "portfolio": portfolio if portfolio else "Not found",
                 },
-                "note": "All data extracted directly from resume"
-            }, execution_time=round(time.time() - start, 3))
+            }
+            
+            # Add note about data source
+            result_data["note"] = "All data extracted directly from resume. Fields marked 'Not found' are not present in the document."
+
+            return ToolResult(self.name, True, result_data, 
+                            execution_time=round(time.time() - start, 3))
         except Exception as e:
             return ToolResult(self.name, False, None, error=str(e),
                             execution_time=round(time.time() - start, 3))
