@@ -1,16 +1,78 @@
 """
-Universal Document Processor - Enhanced V2
+Universal Document Processor - Enhanced V3
 Handles: PDF, DOCX, DOC, TXT, Images (JPG, PNG, JPEG, WEBP)
 Enhanced for complex layouts, multi-column PDFs, creative formats
-Improved contact and name extraction
+Improved contact and name extraction with strict validation
 """
 
 import io
 import re
 import base64
 import requests
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple, Set
 from pathlib import Path
+
+
+# ═══════════════════════════════════════════════════════════════
+#                    NAME VALIDATION BLACKLISTS
+# ═══════════════════════════════════════════════════════════════
+
+# ANY single word match → reject the candidate name
+_STRONG_NAME_BLACKLIST: Set[str] = {
+    # Resume / document labels
+    "resume", "cv", "curriculum", "vitae", "biodata",
+    # Section headers
+    "objective", "summary", "profile", "overview",
+    "education", "experience", "skills", "certifications",
+    "references", "declaration", "signature",
+    "qualifications", "achievements", "accomplishments",
+    "responsibilities", "duties",
+    # HR terms
+    "candidate", "applicant", "recruitment", "hiring",
+    "position", "vacancy",
+    # Section labels
+    "contact", "details", "information", "personal",
+    "professional", "technical", "academic",
+    "employment", "employer",
+    # Job titles
+    "engineer", "developer", "manager", "analyst",
+    "consultant", "designer", "architect", "administrator",
+    "senior", "junior", "lead", "head", "director",
+    "executive", "intern", "trainee",
+    # Industry / org words
+    "software", "hardware", "technology", "technologies",
+    "university", "college", "school", "institute",
+    "company", "corporation", "organization",
+    "private", "limited", "ltd", "inc", "corp", "llc", "pvt",
+    # Degree words
+    "bachelor", "master", "doctor", "phd", "mba",
+    "btech", "mtech", "degree", "diploma",
+    # Other
+    "project", "projects", "work", "history",
+    "reference", "present", "current",
+    # Months
+    "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december",
+    # Days
+    "monday", "tuesday", "wednesday", "thursday",
+    "friday", "saturday", "sunday",
+    # Locations (common cities that appear as headers)
+    "bangalore", "mumbai", "delhi", "chennai", "hyderabad",
+    "pune", "kolkata", "india", "singapore",
+}
+
+# 2 or more word matches → reject
+_SOFT_NAME_BLACKLIST: Set[str] = {
+    "voice", "message", "support", "service", "process",
+    "system", "application", "development",
+    "client", "customer", "business",
+    "department", "team",
+    "specialist", "coordinator", "associate",
+    "responsible", "working", "developing", "managing",
+    "leading", "building", "creating",
+    "page", "date", "mobile", "email", "phone",
+    "address", "city", "state", "country",
+}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -21,43 +83,43 @@ def _clean_extracted_text(text: str) -> str:
     """Clean common text extraction artifacts"""
     if not text:
         return ""
-    
+
     # Fix bullet points
     for bullet in ['•', '●', '○', '■', '▪', '►', '▸', '◆', '◇', '▶', '→', '➤', '➢', '✓', '✔', '☑']:
         text = text.replace(bullet, '\n• ')
-    
+
     # Fix common ligatures
     ligatures = {
         'ﬁ': 'fi', 'ﬂ': 'fl', 'ﬀ': 'ff', 'ﬃ': 'ffi', 'ﬄ': 'ffl',
-        '…': '...', '–': '-', '—': '-', ''': "'", ''': "'",
-        '"': '"', '"': '"', '′': "'", '″': '"'
+        '…': '...', '–': '-', '—': '-', '\u2018': "'", '\u2019': "'",
+        '\u201c': '"', '\u201d': '"', '′': "'", '″': '"'
     }
     for old, new in ligatures.items():
         text = text.replace(old, new)
-    
+
     # Fix multiple spaces but preserve structure
     text = re.sub(r' {3,}', '  ', text)
-    
+
     # Fix phone numbers that get split
     text = re.sub(r'(\+\d{1,3})\s+(\d)', r'\1\2', text)
     text = re.sub(r'(\d{3})\s*[-.)]\s*(\d{3})\s*[-.)]\s*(\d{4})', r'\1-\2-\3', text)
-    
+
     # Fix emails that get split
     text = re.sub(r'(\w)\s+@\s+(\w)', r'\1@\2', text)
     text = re.sub(r'(\w)@(\w+)\s+\.(\w+)', r'\1@\2.\3', text)
     text = re.sub(r'(\w+)\s*@\s*(\w+)\s*\.\s*(\w+)', r'\1@\2.\3', text)
-    
+
     # Fix URLs that get split
     text = re.sub(r'(https?)\s*:\s*/\s*/\s*', r'\1://', text)
     text = re.sub(r'(www)\s*\.\s*', r'www.', text)
     text = re.sub(r'\.\s*(com|org|net|io|in|edu|co)\b', r'.\1', text)
-    
+
     # Fix LinkedIn URLs
     text = re.sub(r'linkedin\s*\.\s*com\s*/\s*in\s*/\s*', r'linkedin.com/in/', text, flags=re.IGNORECASE)
-    
-    # Fix GitHub URLs  
+
+    # Fix GitHub URLs
     text = re.sub(r'github\s*\.\s*com\s*/\s*', r'github.com/', text, flags=re.IGNORECASE)
-    
+
     return text
 
 
@@ -68,25 +130,25 @@ def _reconstruct_columns(text: str) -> str:
     """
     lines = text.split('\n')
     reconstructed = []
-    
+
     i = 0
     while i < len(lines):
         line = lines[i].strip()
-        
+
         # Check if this might be a split line (ends abruptly, next line continues)
         if line and i + 1 < len(lines):
             next_line = lines[i + 1].strip()
-            
+
             # If current line ends with a word and next starts with lowercase, merge
             if (line and not line.endswith(('.', ':', ',', ';', '!', '?')) and
-                next_line and next_line[0].islower()):
+                    next_line and next_line[0].islower()):
                 reconstructed.append(line + ' ' + next_line)
                 i += 2
                 continue
-        
+
         reconstructed.append(line)
         i += 1
-    
+
     return '\n'.join(reconstructed)
 
 
@@ -97,42 +159,41 @@ def _reconstruct_columns(text: str) -> str:
 def extract_text_from_pdf(file_bytes: bytes) -> str:
     """Extract text from PDF with enhanced handling for complex layouts"""
     text_parts = []
-    
+
     try:
         from PyPDF2 import PdfReader
         reader = PdfReader(io.BytesIO(file_bytes))
-        
+
         for page_num, page in enumerate(reader.pages):
             try:
                 # Try standard extraction first
                 page_text = page.extract_text()
-                
+
                 if page_text:
                     page_text = _clean_extracted_text(page_text)
-                    
+
                     # Try to reconstruct columns if needed
                     if _looks_like_multicolumn(page_text):
                         page_text = _reconstruct_columns(page_text)
-                    
+
                     text_parts.append(page_text)
-                    
-            except Exception as e:
+
+            except Exception:
                 # If standard extraction fails, try alternative method
                 try:
-                    # Attempt to get text with different parameters
                     page_text = page.extract_text(extraction_mode="layout")
                     if page_text:
                         text_parts.append(_clean_extracted_text(page_text))
-                except:
+                except Exception:
                     pass
-        
+
         full_text = "\n\n".join(text_parts)
-        
+
         # Post-process to fix common issues
         full_text = _post_process_pdf_text(full_text)
-        
+
         return full_text.strip()
-        
+
     except Exception as e:
         return f"Error reading PDF: {str(e)}"
 
@@ -140,25 +201,25 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
 def _looks_like_multicolumn(text: str) -> bool:
     """Detect if text appears to be from a multi-column layout"""
     lines = text.split('\n')
-    
+
     # Check for signs of multi-column: lots of short lines, irregular spacing
     short_lines = sum(1 for line in lines if 10 < len(line.strip()) < 40)
-    total_lines = len([l for l in lines if l.strip()])
-    
+    total_lines = len([ln for ln in lines if ln.strip()])
+
     if total_lines > 0 and short_lines / total_lines > 0.5:
         return True
-    
+
     # Check for excessive whitespace in middle of lines (column gap)
     lines_with_gaps = sum(1 for line in lines if re.search(r'\S\s{5,}\S', line))
     if total_lines > 0 and lines_with_gaps / total_lines > 0.3:
         return True
-    
+
     return False
 
 
 def _post_process_pdf_text(text: str) -> str:
     """Post-process PDF text to fix common extraction issues"""
-    
+
     # Fix common section headers that may have been split
     section_headers = [
         'EDUCATION', 'EXPERIENCE', 'WORK EXPERIENCE', 'PROFESSIONAL EXPERIENCE',
@@ -166,15 +227,15 @@ def _post_process_pdf_text(text: str) -> str:
         'ACHIEVEMENTS', 'AWARDS', 'SUMMARY', 'OBJECTIVE', 'PROFILE',
         'CONTACT', 'PERSONAL INFORMATION', 'REFERENCES'
     ]
-    
+
     for header in section_headers:
         # Fix headers that got split across lines
         pattern = r'(' + r'\s*'.join(list(header)) + r')'
         text = re.sub(pattern, header, text, flags=re.IGNORECASE)
-    
+
     # Remove excessive blank lines
     text = re.sub(r'\n{4,}', '\n\n\n', text)
-    
+
     return text
 
 
@@ -187,10 +248,10 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
     try:
         from docx import Document
         from docx.oxml.ns import qn
-        
+
         doc = Document(io.BytesIO(file_bytes))
         text_parts = []
-        
+
         # ── Extract from headers (often contains name/contact) ──
         for section in doc.sections:
             try:
@@ -199,7 +260,7 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
                     for para in header.paragraphs:
                         if para.text.strip():
                             text_parts.insert(0, para.text.strip())
-                    
+
                     # Also check tables in header
                     for table in header.tables:
                         for row in table.rows:
@@ -212,10 +273,9 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
                                 text_parts.insert(0, " | ".join(row_text))
             except Exception:
                 pass
-        
+
         # ── Extract text boxes (common in creative resumes) ──
         try:
-            # Access the document's XML to find text boxes
             for element in doc.element.body.iter():
                 if element.tag.endswith('txbxContent'):
                     for child in element.iter():
@@ -223,36 +283,35 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
                             text_parts.append(child.text.strip())
         except Exception:
             pass
-        
+
         # ── Extract from main body with style awareness ──
         for para in doc.paragraphs:
             txt = para.text.strip()
             if txt:
                 style_name = para.style.name if para.style else ""
-                
+
                 # Detect headings and format appropriately
                 if 'Heading' in style_name or 'Title' in style_name:
                     text_parts.append(f"\n{txt.upper()}\n")
                 else:
                     text_parts.append(txt)
-        
+
         # ── Extract from tables (very common in resumes) ──
         for table in doc.tables:
             for row in table.rows:
                 row_data = []
                 for cell in row.cells:
-                    # Get all paragraphs in cell
                     cell_text = []
                     for para in cell.paragraphs:
                         if para.text.strip():
                             cell_text.append(para.text.strip())
-                    
+
                     if cell_text:
                         row_data.append(" ".join(cell_text))
-                
+
                 if row_data:
                     text_parts.append(" | ".join(row_data))
-        
+
         # ── Extract from footers ──
         for section in doc.sections:
             try:
@@ -263,28 +322,24 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
                             text_parts.append(para.text.strip())
             except Exception:
                 pass
-        
+
         # ── Try to extract from shapes/drawings ──
         try:
             for rel in doc.part.rels.values():
                 if "drawing" in str(rel.target_ref).lower():
-                    try:
-                        # Attempt to get text from drawings
-                        pass
-                    except:
-                        pass
+                    pass
         except Exception:
             pass
-        
+
         full_text = "\n".join(text_parts)
         return _clean_extracted_text(full_text)
-        
+
     except Exception as e:
         return f"Error reading DOCX: {str(e)}"
 
 
 # ═══════════════════════════════════════════════════════════════
-#                    DOC FILE EXTRACTION (NEW)
+#                    DOC FILE EXTRACTION
 # ═══════════════════════════════════════════════════════════════
 
 def extract_text_from_doc(file_bytes: bytes) -> str:
@@ -293,7 +348,7 @@ def extract_text_from_doc(file_bytes: bytes) -> str:
     Uses multiple methods for maximum compatibility
     """
     text = ""
-    
+
     # Method 1: Try using python-docx (sometimes works with .doc)
     try:
         from docx import Document
@@ -312,25 +367,21 @@ def extract_text_from_doc(file_bytes: bytes) -> str:
             return _clean_extracted_text(text)
     except Exception:
         pass
-    
+
     # Method 2: Try antiword via subprocess (Linux/Mac)
     try:
         import subprocess
         import tempfile
         import os
-        
-        # Write bytes to temp file
+
         with tempfile.NamedTemporaryFile(suffix='.doc', delete=False) as tmp:
             tmp.write(file_bytes)
             tmp_path = tmp.name
-        
+
         try:
-            # Try antiword
             result = subprocess.run(
                 ['antiword', tmp_path],
-                capture_output=True,
-                text=True,
-                timeout=30
+                capture_output=True, text=True, timeout=30
             )
             if result.returncode == 0 and result.stdout.strip():
                 text = result.stdout
@@ -339,30 +390,27 @@ def extract_text_from_doc(file_bytes: bytes) -> str:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
         finally:
-            # Clean up temp file
             try:
                 os.unlink(tmp_path)
-            except:
+            except OSError:
                 pass
     except Exception:
         pass
-    
+
     # Method 3: Try catdoc via subprocess (Linux/Mac)
     try:
         import subprocess
         import tempfile
         import os
-        
+
         with tempfile.NamedTemporaryFile(suffix='.doc', delete=False) as tmp:
             tmp.write(file_bytes)
             tmp_path = tmp.name
-        
+
         try:
             result = subprocess.run(
                 ['catdoc', tmp_path],
-                capture_output=True,
-                text=True,
-                timeout=30
+                capture_output=True, text=True, timeout=30
             )
             if result.returncode == 0 and result.stdout.strip():
                 text = result.stdout
@@ -373,53 +421,43 @@ def extract_text_from_doc(file_bytes: bytes) -> str:
         finally:
             try:
                 os.unlink(tmp_path)
-            except:
+            except OSError:
                 pass
     except Exception:
         pass
-    
-    # Method 4: Try olefile to extract raw text (works on most .doc files)
+
+    # Method 4: Try olefile to extract raw text
     try:
         import olefile
-        
+
         ole = olefile.OleFileIO(io.BytesIO(file_bytes))
-        
-        # Try to get WordDocument stream
+
         if ole.exists('WordDocument'):
-            # Extract text from various streams
             text_parts = []
-            
-            # Try to get text from different streams
-            streams_to_try = [
-                'WordDocument',
-                '1Table',
-                '0Table',
-                'Data',
-            ]
-            
+            streams_to_try = ['WordDocument', '1Table', '0Table', 'Data']
+
             for stream_name in streams_to_try:
                 if ole.exists(stream_name):
                     try:
                         stream_data = ole.openstream(stream_name).read()
-                        # Extract printable ASCII/Unicode text
                         extracted = _extract_text_from_binary(stream_data)
                         if extracted:
                             text_parts.append(extracted)
-                    except:
+                    except Exception:
                         pass
-            
+
             text = "\n".join(text_parts)
             ole.close()
-            
+
             if text and len(text.strip()) > 50:
                 return _clean_extracted_text(text)
-        
+
         ole.close()
     except ImportError:
         pass
     except Exception:
         pass
-    
+
     # Method 5: Raw binary text extraction (last resort)
     try:
         text = _extract_text_from_binary(file_bytes)
@@ -427,17 +465,17 @@ def extract_text_from_doc(file_bytes: bytes) -> str:
             return _clean_extracted_text(text)
     except Exception:
         pass
-    
+
     # Method 6: Try textract if available
     try:
         import textract
         import tempfile
         import os
-        
+
         with tempfile.NamedTemporaryFile(suffix='.doc', delete=False) as tmp:
             tmp.write(file_bytes)
             tmp_path = tmp.name
-        
+
         try:
             text = textract.process(tmp_path).decode('utf-8', errors='ignore')
             if len(text.strip()) > 50:
@@ -445,13 +483,13 @@ def extract_text_from_doc(file_bytes: bytes) -> str:
         finally:
             try:
                 os.unlink(tmp_path)
-            except:
+            except OSError:
                 pass
     except ImportError:
         pass
     except Exception:
         pass
-    
+
     return text if text else "Error: Could not extract text from .DOC file. Please convert to .DOCX or PDF format."
 
 
@@ -461,42 +499,34 @@ def _extract_text_from_binary(data: bytes) -> str:
     Handles both ASCII and Unicode text embedded in binary files
     """
     text_parts = []
-    
+
     # Extract ASCII text (sequences of printable characters)
     ascii_pattern = rb'[\x20-\x7E]{4,}'
     ascii_matches = re.findall(ascii_pattern, data)
     for match in ascii_matches:
         try:
             decoded = match.decode('ascii', errors='ignore')
-            # Filter out garbage
             if _is_meaningful_text(decoded):
                 text_parts.append(decoded)
-        except:
+        except Exception:
             pass
-    
+
     # Extract UTF-16 text (common in .doc files)
     try:
-        # UTF-16 LE (Little Endian) - most common in Windows
         utf16_text = data.decode('utf-16-le', errors='ignore')
-        # Filter to printable characters
         cleaned = ''.join(c if c.isprintable() or c in '\n\r\t' else ' ' for c in utf16_text)
-        # Find meaningful sequences
         sequences = re.findall(r'[\w\s@.,;:!?()\-]{5,}', cleaned)
         for seq in sequences:
             if _is_meaningful_text(seq):
                 text_parts.append(seq)
-    except:
+    except Exception:
         pass
-    
+
     # Join and clean
     full_text = ' '.join(text_parts)
-    
-    # Remove excessive whitespace
     full_text = re.sub(r'\s+', ' ', full_text)
-    
-    # Try to reconstruct lines
     full_text = re.sub(r'([.!?])\s+([A-Z])', r'\1\n\2', full_text)
-    
+
     return full_text.strip()
 
 
@@ -504,31 +534,27 @@ def _is_meaningful_text(text: str) -> bool:
     """Check if extracted text is meaningful (not garbage)"""
     if not text or len(text) < 4:
         return False
-    
-    # Count letters vs other characters
+
     letters = sum(1 for c in text if c.isalpha())
     total = len(text)
-    
-    # Should be at least 50% letters
+
     if letters / total < 0.4:
         return False
-    
-    # Should not be repetitive
+
     if len(set(text.lower())) < len(text) * 0.3:
         return False
-    
-    # Check for common garbage patterns
+
     garbage_patterns = [
-        r'^[A-Z]{20,}$',  # All caps long string
-        r'^[a-z]{20,}$',  # All lowercase long string
-        r'^\d+$',  # Only digits
-        r'^[\W_]+$',  # Only special characters
+        r'^[A-Z]{20,}$',
+        r'^[a-z]{20,}$',
+        r'^\d+$',
+        r'^[\W_]+$',
     ]
-    
+
     for pattern in garbage_patterns:
         if re.match(pattern, text):
             return False
-    
+
     return True
 
 
@@ -538,18 +564,23 @@ def _is_meaningful_text(text: str) -> bool:
 
 def extract_text_from_txt(file_bytes: bytes) -> str:
     """Extract text from TXT with encoding detection"""
-    encodings = ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252', 'ascii', 'utf-16', 'utf-16-le', 'utf-16-be', 'iso-8859-1']
-    
+    encodings = [
+        'utf-8', 'utf-8-sig', 'latin-1', 'cp1252', 'ascii',
+        'utf-16', 'utf-16-le', 'utf-16-be', 'iso-8859-1',
+    ]
+
     for enc in encodings:
         try:
             text = file_bytes.decode(enc)
-            # Verify it's valid text
-            if text and not any(ord(c) < 9 or (ord(c) > 13 and ord(c) < 32) for c in text[:1000] if c not in '\t\n\r'):
+            if text and not any(
+                ord(c) < 9 or (13 < ord(c) < 32)
+                for c in text[:1000]
+                if c not in '\t\n\r'
+            ):
                 return _clean_extracted_text(text)
         except Exception:
             continue
-    
-    # Fallback with error handling
+
     return _clean_extracted_text(file_bytes.decode('utf-8', errors='ignore'))
 
 
@@ -562,7 +593,7 @@ def extract_text_from_image(
     groq_api_key: str,
     file_name: str = "resume.png"
 ) -> str:
-    """Extract ALL text from resume image using Groq Vision API with enhanced prompting"""
+    """Extract ALL text from resume image using Groq Vision API"""
     try:
         ext = Path(file_name).suffix.lower()
         mime_map = {
@@ -577,7 +608,6 @@ def extract_text_from_image(
             "Content-Type": "application/json"
         }
 
-        # Enhanced prompt for better extraction
         extraction_prompt = """You are an expert resume OCR system. Your task is to extract EVERY piece of text from this resume image with 100% accuracy.
 
 CRITICAL EXTRACTION RULES:
@@ -657,6 +687,73 @@ Return clean, structured text with clear section breaks. Do NOT summarize or par
 
 
 # ═══════════════════════════════════════════════════════════════
+#                    NAME / CONTACT VALIDATION
+# ═══════════════════════════════════════════════════════════════
+
+def _is_valid_name(name: str) -> bool:
+    """
+    Validate if a string looks like a valid person name.
+    Uses two-tier blacklist to reject section headers, job titles,
+    and random phrases.
+    """
+    if not name:
+        return False
+
+    name_clean = name.strip()
+    name_lower = name_clean.lower()
+
+    # Exact-match rejects
+    exact_rejects = {
+        "", "n/a", "na", "none", "unknown", "candidate",
+        "your name", "first last", "firstname lastname",
+        "name", "full name", "[name]", "<name>", "(name)",
+        "enter name", "type name", "not available",
+        "curriculum vitae", "resume", "cv",
+    }
+    if name_lower in exact_rejects:
+        return False
+
+    words = name_clean.split()
+
+    # Must have 2-4 words
+    if not (2 <= len(words) <= 4):
+        return False
+
+    # Each word: reasonable length, mostly alphabetic
+    for w in words:
+        stripped = w.strip(".-'")
+        if not stripped or len(stripped) > 20:
+            return False
+        alpha_ratio = sum(c.isalpha() for c in stripped) / max(len(stripped), 1)
+        if alpha_ratio < 0.8:
+            return False
+
+    # Overall alpha ratio
+    alpha_chars = sum(1 for c in name_clean if c.isalpha() or c.isspace())
+    if alpha_chars / max(len(name_clean), 1) < 0.80:
+        return False
+
+    # ── Strong blacklist: ANY word → reject ──
+    for w in words:
+        if w.lower().strip(".,;:()") in _STRONG_NAME_BLACKLIST:
+            return False
+
+    # ── Soft blacklist: 2+ words → reject ──
+    soft_hits = sum(
+        1 for w in words
+        if w.lower().strip(".,;:()") in _SOFT_NAME_BLACKLIST
+    )
+    if soft_hits >= 2:
+        return False
+
+    # Names are usually Title Case or ALL CAPS, not all lowercase
+    if name_clean == name_clean.lower():
+        return False
+
+    return True
+
+
+# ═══════════════════════════════════════════════════════════════
 #                    CONTACT EXTRACTION HELPERS
 # ═══════════════════════════════════════════════════════════════
 
@@ -665,7 +762,7 @@ def extract_contacts_from_text(text: str) -> Dict:
     Enhanced contact extraction with 20+ patterns for each field
     Works even without labels like 'Email:', 'Phone:', etc.
     """
-    contacts = {
+    contacts: Dict[str, str] = {
         "name": "",
         "email": "",
         "phone": "",
@@ -675,10 +772,10 @@ def extract_contacts_from_text(text: str) -> Dict:
         "portfolio": "",
         "location": ""
     }
-    
+
     if not text:
         return contacts
-    
+
     # ═══════════════════════════════════════
     # EMAIL EXTRACTION (Most reliable)
     # ═══════════════════════════════════════
@@ -688,65 +785,53 @@ def extract_contacts_from_text(text: str) -> Dict:
         r'[\w._%+-]+\[at\][\w.-]+\.[a-zA-Z]{2,}',
         r'[\w._%+-]+\(at\)[\w.-]+\.[a-zA-Z]{2,}',
     ]
-    
+
     for pattern in email_patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             email = match.group(0).strip()
-            email = re.sub(r'\s+', '', email)  # Remove spaces
+            email = re.sub(r'\s+', '', email)
             email = re.sub(r'\[at\]|\(at\)', '@', email, flags=re.IGNORECASE)
             contacts["email"] = email
             break
-    
+
     # ═══════════════════════════════════════
-    # PHONE EXTRACTION (Multiple international formats)
+    # PHONE EXTRACTION
     # ═══════════════════════════════════════
     phone_patterns = [
-        # International with + 
         r'\+\d{1,3}[-.\s]?\(?\d{2,5}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}',
         r'\+\d{1,3}[-.\s]?\d{4,5}[-.\s]?\d{5,6}',
         r'\+\d{10,15}',
-        
-        # Indian formats
         r'\+91[-.\s]?\d{5}[-.\s]?\d{5}',
         r'\+91[-.\s]?\d{10}',
         r'91[-.\s]?\d{10}',
         r'0\d{2,4}[-.\s]?\d{6,8}',
-        
-        # US formats
         r'\(\d{3}\)\s*\d{3}[-.\s]?\d{4}',
         r'\d{3}[-.\s]\d{3}[-.\s]\d{4}',
         r'1[-.\s]?\d{3}[-.\s]?\d{3}[-.\s]?\d{4}',
-        
-        # UK formats
         r'\+44[-.\s]?\d{4}[-.\s]?\d{6}',
         r'0\d{4}[-.\s]?\d{6}',
-        
-        # Generic patterns
         r'(?:Phone|Ph|Tel|Mobile|Cell|Contact|M|T|P)[\s.:]*[\+]?\d[\d\s\-().]{8,18}',
         r'\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b',
         r'\b\d{5}[-.\s]?\d{5}\b',
         r'\b\d{10,12}\b',
     ]
-    
+
     for pattern in phone_patterns:
         matches = re.findall(pattern, text, re.IGNORECASE)
         for match in matches:
-            # Clean the match
-            cleaned = re.sub(r'^(?:Phone|Ph|Tel|Mobile|Cell|Contact|M|T|P)[\s.:]*', '', match, flags=re.IGNORECASE)
+            cleaned = re.sub(
+                r'^(?:Phone|Ph|Tel|Mobile|Cell|Contact|M|T|P)[\s.:]*',
+                '', match, flags=re.IGNORECASE
+            )
             cleaned = cleaned.strip()
-            
-            # Count digits
             digits = re.sub(r'[^\d]', '', cleaned)
-            
-            # Valid phone should have 10-15 digits
             if 10 <= len(digits) <= 15:
                 contacts["phone"] = cleaned
                 break
-        
         if contacts["phone"]:
             break
-    
+
     # ═══════════════════════════════════════
     # LINKEDIN EXTRACTION
     # ═══════════════════════════════════════
@@ -756,7 +841,7 @@ def extract_contacts_from_text(text: str) -> Dict:
         r'linkedin:\s*[\w-]+',
         r'in/[\w-]+\s*\(linkedin\)',
     ]
-    
+
     for pattern in linkedin_patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
@@ -766,7 +851,7 @@ def extract_contacts_from_text(text: str) -> Dict:
                     linkedin = f"linkedin.com/in/{linkedin.split('/')[-1]}"
             contacts["linkedin"] = linkedin
             break
-    
+
     # ═══════════════════════════════════════
     # GITHUB EXTRACTION
     # ═══════════════════════════════════════
@@ -775,13 +860,13 @@ def extract_contacts_from_text(text: str) -> Dict:
         r'github\.com/[\w-]+',
         r'github:\s*[\w-]+',
     ]
-    
+
     for pattern in github_patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             contacts["github"] = match.group(0).strip()
             break
-    
+
     # ═══════════════════════════════════════
     # PORTFOLIO/WEBSITE EXTRACTION
     # ═══════════════════════════════════════
@@ -789,94 +874,100 @@ def extract_contacts_from_text(text: str) -> Dict:
         r'(?:https?://)?(?:www\.)?[\w-]+\.(?:com|io|dev|me|org|net|co|in)/?\S*',
         r'(?:portfolio|website|web|site)[\s.:]*(?:https?://)?[\w.-]+\.[a-z]{2,}',
     ]
-    
+
     for pattern in website_patterns:
         matches = re.findall(pattern, text, re.IGNORECASE)
         for match in matches:
             url = match.strip()
-            # Skip if it's linkedin or github
             if 'linkedin' not in url.lower() and 'github' not in url.lower():
-                # Skip email-like patterns
                 if '@' not in url:
                     contacts["portfolio"] = url
                     break
         if contacts["portfolio"]:
             break
-    
+
     # ═══════════════════════════════════════
     # ADDRESS EXTRACTION
     # ═══════════════════════════════════════
     address_patterns = [
-        # With PIN/ZIP codes
         r'(?:No[.:]?\s*)?[\d]+[,\s]+[\w\s]+(?:Street|St|Road|Rd|Avenue|Ave|Nagar|Colony|Layout|Block|Lane|Apt|Apartment|Floor|Building|Bldg)[\w\s,.-]+(?:\d{5,6})',
         r'[\w\s]+,\s*[\w\s]+,\s*[\w\s]+-?\s*\d{5,6}',
         r'[\w\s]+,\s*[\w\s]+,\s*[\w\s]+,\s*\d{5,6}',
-        
-        # Address after label
         r'(?:Address|Location|Residence|Home)[\s.:]+([^\n]{15,100})',
-        
-        # Common city patterns
         r'(?:Bangalore|Bengaluru|Mumbai|Delhi|Chennai|Hyderabad|Pune|Kolkata|Noida|Gurgaon|Gurugram)[\w\s,.-]+\d{5,6}',
         r'(?:New York|San Francisco|Los Angeles|Chicago|Seattle|Boston|Austin)[\w\s,.-]+\d{5}',
     ]
-    
+
     for pattern in address_patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
-            addr = match.group(0).strip()
-            # Clean up
-            addr = re.sub(r'^(?:Address|Location|Residence|Home)[\s.:]+', '', addr, flags=re.IGNORECASE)
+            addr = match.group(1) if match.lastindex else match.group(0)
+            addr = re.sub(
+                r'^(?:Address|Location|Residence|Home)[\s.:]+',
+                '', addr, flags=re.IGNORECASE
+            )
+            addr = addr.strip()
             if 15 < len(addr) < 200:
                 contacts["address"] = addr
                 break
-    
+
     # ═══════════════════════════════════════
     # LOCATION EXTRACTION (City, State, Country)
     # ═══════════════════════════════════════
     location_patterns = [
-        # City, State format
         r'(?:Location|Based in|Located at|City)[\s.:]*([A-Z][a-zA-Z\s]+,\s*[A-Z][a-zA-Z\s]+)',
-        
-        # Just city names (common ones)
         r'\b(Bangalore|Bengaluru|Mumbai|Delhi|NCR|Chennai|Hyderabad|Pune|Kolkata|Noida|Gurgaon|Gurugram|Ahmedabad|Jaipur|Lucknow|Chandigarh|Indore|Bhopal|Kochi|Coimbatore|Trivandrum|Mysore|Nagpur)\b',
         r'\b(New York|NYC|San Francisco|SF|Los Angeles|LA|Chicago|Seattle|Boston|Austin|Denver|Atlanta|Dallas|Houston|Phoenix|San Diego|San Jose|Portland|Miami|Washington DC|Philadelphia)\b',
         r'\b(London|Berlin|Amsterdam|Dublin|Singapore|Tokyo|Sydney|Toronto|Vancouver|Melbourne|Paris|Munich|Barcelona|Stockholm|Copenhagen|Zurich|Dubai|Hong Kong)\b',
-        
-        # Country
         r'\b(India|USA|United States|UK|United Kingdom|Canada|Australia|Germany|Netherlands|Singapore|UAE|Ireland)\b',
     ]
-    
+
     for pattern in location_patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             loc = match.group(1) if match.lastindex else match.group(0)
             contacts["location"] = loc.strip()
             break
-    
+
     # ═══════════════════════════════════════
-    # NAME EXTRACTION (Most complex - try multiple strategies)
+    # NAME EXTRACTION
     # ═══════════════════════════════════════
     contacts["name"] = extract_name_from_text(text)
-    
+
     return contacts
 
 
 def extract_name_from_text(text: str) -> str:
     """
-    Enhanced name extraction using multiple strategies
-    Works even without 'Name:' label
+    Enhanced name extraction using multiple strategies.
+    Uses strict validation to reject section headers, job titles,
+    and random phrases.
     """
     if not text:
         return ""
-    
+
     lines = text.strip().split("\n")
-    
+
+    # ── Skip keywords (lines containing these are NOT names) ──
+    skip_keywords = [
+        'resume', 'curriculum', 'vitae', 'cv', 'http', 'www', '@',
+        'address', 'phone', 'email', 'street', 'road', 'avenue',
+        'objective', 'summary', 'profile', 'linkedin', 'github',
+        'portfolio', 'mobile', 'tel:', 'contact', 'experience',
+        'education', 'skills', 'professional', 'career', 'about',
+        'personal', 'details', 'information', 'confidential',
+        'page', 'date', 'application', 'position', 'job',
+        'candidate', 'recruitment', 'hiring', 'vacancy',
+        'declaration', 'reference', 'signature',
+        'company', 'corporation', 'limited', 'pvt', 'ltd',
+    ]
+
     # Strategy 1: Look for labeled name
     name_label_patterns = [
         r'(?:Name|Full Name|Candidate Name)[\s.:]+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){1,3})',
         r'^([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){1,3})[\s]*$',
     ]
-    
+
     for pattern in name_label_patterns:
         for line in lines[:15]:
             match = re.match(pattern, line.strip(), re.IGNORECASE)
@@ -884,117 +975,93 @@ def extract_name_from_text(text: str) -> str:
                 name = match.group(1).strip()
                 if _is_valid_name(name):
                     return name
-    
+
     # Strategy 2: First substantial line that looks like a name
-    skip_keywords = [
-        'resume', 'curriculum', 'vitae', 'cv', 'http', 'www', '@',
-        'address', 'phone', 'email', 'street', 'road', 'avenue',
-        'objective', 'summary', 'profile', 'linkedin', 'github',
-        'portfolio', 'mobile', 'tel:', 'contact', 'experience',
-        'education', 'skills', 'professional', 'career', 'about'
-    ]
-    
     for line in lines[:15]:
         line = line.strip()
-        
-        if not line or len(line) < 3:
+
+        if not line or len(line) < 4 or len(line) > 45:
             continue
-        
+
         # Skip lines with keywords
         if any(kw in line.lower() for kw in skip_keywords):
             continue
-        
-        # Skip lines that look like addresses (contain numbers at start or have 5+ digits)
-        if re.match(r'^\d', line) or len(re.findall(r'\d', line)) >= 5:
+
+        # Skip lines with digits at start, 5+ digits, phone-like, or email
+        if re.match(r'^\d', line):
             continue
-        
-        # Skip lines that look like phone numbers
+        if len(re.findall(r'\d', line)) >= 5:
+            continue
         if re.match(r'^[\+\d\(\)]', line):
             continue
-        
-        # Skip very long lines (probably not a name)
-        if len(line) > 50:
+        if '@' in line or 'http' in line.lower():
             continue
-        
-        # Check if line is mostly alphabetic
+
+        # Must be mostly alphabetic
         alpha_chars = sum(1 for c in line if c.isalpha() or c.isspace() or c == '.')
-        if alpha_chars / max(len(line), 1) < 0.8:
+        if alpha_chars / max(len(line), 1) < 0.85:
             continue
-        
-        # Check if it follows name patterns
-        # Pattern: First Last, First Middle Last, or FIRST LAST
+
+        # Check explicit name patterns
         name_patterns = [
-            r'^[A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?$',  # First Last or First Middle Last
-            r'^[A-Z]+\s+[A-Z]+(?:\s+[A-Z]+)?$',  # FIRST LAST
-            r'^[A-Z][a-z]+\s+[A-Z]\.\s*[A-Z][a-z]+$',  # First M. Last
-            r'^[A-Z][a-z]+\s+[A-Z][a-z]+\s+[A-Z][a-z]+$',  # First Middle Last
-            r'^Dr\.\s+[A-Z][a-z]+\s+[A-Z][a-z]+$',  # Dr. First Last
-            r'^[A-Z][a-z]+\s+[A-Z][a-z]+-[A-Z][a-z]+$',  # First Last-Last (hyphenated)
+            r'^[A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?$',
+            r'^[A-Z]+\s+[A-Z]+(?:\s+[A-Z]+)?$',
+            r'^[A-Z][a-z]+\s+[A-Z]\.\s*[A-Z][a-z]+$',
+            r'^[A-Z][a-z]+\s+[A-Z][a-z]+\s+[A-Z][a-z]+$',
+            r'^Dr\.\s+[A-Z][a-z]+\s+[A-Z][a-z]+$',
+            r'^Mr\.\s*[A-Z][a-z]+\s+[A-Z][a-z]+$',
+            r'^Ms\.\s*[A-Z][a-z]+\s+[A-Z][a-z]+$',
+            r'^[A-Z][a-z]+\s+[A-Z][a-z]+-[A-Z][a-z]+$',
         ]
-        
+
         for pattern in name_patterns:
             if re.match(pattern, line):
-                return line
-        
-        # Fallback: if line has 2-4 capitalized words, it might be a name
+                if _is_valid_name(line):
+                    return line
+
+        # Fallback: 2-4 capitalized words of reasonable length
         words = line.split()
         if 2 <= len(words) <= 4:
-            capitalized_words = sum(1 for w in words if w[0].isupper())
-            if capitalized_words == len(words):
-                # Additional check: words should be reasonable length
+            if all(w[0].isupper() for w in words if w):
                 if all(2 <= len(w) <= 15 for w in words):
                     if _is_valid_name(line):
                         return line
-    
-    # Strategy 3: Look for name after "I am" or "My name is"
+
+    # Strategy 3: Look for "I am" / "My name is"
     intro_patterns = [
         r"(?:I am|I'm|My name is|This is)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})",
     ]
-    
+
     for pattern in intro_patterns:
         match = re.search(pattern, text)
         if match:
             name = match.group(1).strip()
             if _is_valid_name(name):
                 return name
-    
-    return ""
 
-
-def _is_valid_name(name: str) -> str:
-    """Validate if a string looks like a valid person name"""
-    if not name:
-        return False
-    
-    # Common words that are NOT names
-    not_names = {
-        'resume', 'objective', 'summary', 'experience', 'education', 'skills',
-        'contact', 'email', 'phone', 'address', 'profile', 'professional',
-        'career', 'curriculum', 'vitae', 'page', 'date', 'present', 'current',
-        'january', 'february', 'march', 'april', 'may', 'june', 'july',
-        'august', 'september', 'october', 'november', 'december',
-        'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
-        'engineer', 'developer', 'manager', 'analyst', 'consultant', 'designer',
-        'senior', 'junior', 'lead', 'head', 'director', 'executive',
-        'software', 'hardware', 'technical', 'information', 'technology',
-        'university', 'college', 'school', 'institute', 'company', 'corporation'
+    # Strategy 4: ALL CAPS line (common in some formats)
+    section_headers_upper = {
+        'RESUME', 'CURRICULUM', 'VITAE', 'CV', 'OBJECTIVE',
+        'SUMMARY', 'EXPERIENCE', 'EDUCATION', 'SKILLS',
+        'CONTACT', 'PROFILE', 'ABOUT', 'PROJECTS',
+        'CERTIFICATIONS', 'ACHIEVEMENTS', 'AWARDS',
+        'REFERENCES', 'DECLARATION', 'PERSONAL',
+        'PROFESSIONAL', 'TECHNICAL', 'WORK', 'HISTORY',
+        'QUALIFICATIONS', 'RESPONSIBILITIES',
+        'DETAILS', 'INFORMATION', 'OVERVIEW',
     }
-    
-    words = name.lower().split()
-    
-    # Check if any word is in not_names
-    if any(w in not_names for w in words):
-        return False
-    
-    # Name should have 2-4 words
-    if not (2 <= len(words) <= 4):
-        return False
-    
-    # Each word should be reasonable length
-    if not all(2 <= len(w) <= 15 for w in words):
-        return False
-    
-    return True
+
+    for line in lines[:10]:
+        line = line.strip()
+        if line and line.isupper() and 5 <= len(line) <= 40:
+            words = line.split()
+            if 2 <= len(words) <= 4:
+                if not any(header in line for header in section_headers_upper):
+                    title_name = line.title()
+                    if _is_valid_name(title_name):
+                        return title_name
+
+    return ""
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1005,7 +1072,7 @@ def get_file_preview_data(file_bytes: bytes, file_name: str) -> Dict:
     """Generate preview data for displaying uploaded file in UI"""
     ext = Path(file_name).suffix.lower()
 
-    preview = {
+    preview: Dict = {
         "type": ext,
         "name": file_name,
         "size_kb": round(len(file_bytes) / 1024, 1),
@@ -1018,8 +1085,10 @@ def get_file_preview_data(file_bytes: bytes, file_name: str) -> Dict:
     if ext in [".jpg", ".jpeg", ".png", ".webp"]:
         preview["can_preview"] = True
         preview["preview_data"] = base64.b64encode(file_bytes).decode("utf-8")
-        mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                ".png": "image/png", ".webp": "image/webp"}
+        mime = {
+            ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".png": "image/png", ".webp": "image/webp",
+        }
         preview["mime_type"] = mime.get(ext, "image/png")
 
     elif ext == ".pdf":
@@ -1051,13 +1120,13 @@ def get_file_preview_data(file_bytes: bytes, file_name: str) -> Dict:
 # ═══════════════════════════════════════════════════════════════
 
 def process_uploaded_file(uploaded_file, groq_api_key: str = "") -> Dict:
-    """Process any uploaded file and extract text + preview with enhanced extraction"""
+    """Process any uploaded file and extract text + preview"""
     file_name = uploaded_file.name
     file_bytes = uploaded_file.read()
     uploaded_file.seek(0)
     ext = Path(file_name).suffix.lower()
 
-    result = {
+    result: Dict = {
         "file_name": file_name,
         "file_type": ext,
         "file_size_kb": round(len(file_bytes) / 1024, 1),
@@ -1075,7 +1144,6 @@ def process_uploaded_file(uploaded_file, groq_api_key: str = "") -> Dict:
         elif ext == ".docx":
             result["text"] = extract_text_from_docx(file_bytes)
         elif ext == ".doc":
-            # Handle legacy .DOC format
             result["text"] = extract_text_from_doc(file_bytes)
         elif ext in [".txt", ".text", ".md"]:
             result["text"] = extract_text_from_txt(file_bytes)
@@ -1089,13 +1157,11 @@ def process_uploaded_file(uploaded_file, groq_api_key: str = "") -> Dict:
             return result
 
         if result["text"] and len(result["text"].strip()) > 30:
-            # Check for extraction error messages
             if result["text"].startswith("Error:"):
                 result["error"] = result["text"]
                 result["success"] = False
             else:
                 result["success"] = True
-                # Pre-extract contacts for better parsing
                 result["extracted_contacts"] = extract_contacts_from_text(result["text"])
         else:
             result["error"] = "Could not extract sufficient text. Try converting to PDF or DOCX format."
