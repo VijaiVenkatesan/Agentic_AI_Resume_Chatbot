@@ -297,7 +297,7 @@ class ResumeSearchTool(MCPTool):
 
 class SkillAnalyzerTool(MCPTool):
     name = "skill_analyzer"
-    description = "Extract and list ALL skills from resume. Only compares against required_skills if explicitly provided. Returns ONLY skills found in the resume."
+    description = "Extract and list ALL skills from resume. Only compares against required_skills if explicitly provided. Returns ONLY skills actually found in the resume - no hallucination."
     parameters = [
         ToolParameter("required_skills", "string",
                       "Comma-separated skills to match (ONLY if JD uploaded or user provides skills)", False, "")
@@ -313,9 +313,39 @@ class SkillAnalyzerTool(MCPTool):
     def set_text(self, text: str):
         self._resume_text = text
 
+    def _deduplicate_skills(self, skills: List[str]) -> List[str]:
+        """Remove duplicate skills while preserving order"""
+        if not skills:
+            return []
+        
+        seen = set()
+        unique = []
+        
+        for skill in skills:
+            if not skill:
+                continue
+            
+            skill_str = str(skill).strip()
+            skill_lower = skill_str.lower()
+            
+            # Skip invalid values
+            if skill_lower in ['n/a', 'na', 'none', 'null', '-', '—', 'unknown', '']:
+                continue
+            
+            if skill_lower not in seen:
+                seen.add(skill_lower)
+                unique.append(skill_str)
+        
+        return unique
+
     def _extract_skills_from_text(self, text: str) -> List[str]:
-        """Extract skills directly from text"""
+        """Extract skills directly from text using patterns"""
+        if not text:
+            return []
+        
         skills = set()
+        text_lower = text.lower()
+        
         patterns = [
             r'\b(Python|Java|JavaScript|TypeScript|C\+\+|C#|Ruby|Go|Rust|Swift|Kotlin|PHP|Scala|R|MATLAB)\b',
             r'\b(React|Angular|Vue|Next\.?js|Node\.?js|Express|Django|Flask|FastAPI|Spring|Laravel|jQuery)\b',
@@ -331,7 +361,7 @@ class SkillAnalyzerTool(MCPTool):
         
         for pattern in patterns:
             matches = re.findall(pattern, text, re.IGNORECASE)
-            skills.update([m.strip() for m in matches])
+            skills.update([m.strip() for m in matches if m.strip()])
         
         return list(skills)
 
@@ -340,9 +370,12 @@ class SkillAnalyzerTool(MCPTool):
         try:
             req_input = kwargs.get("required_skills", "").strip()
             
-            # Get skills from parsed resume
+            # ═══════════════════════════════════════
+            # STEP 1: Get skills from parsed resume
+            # ═══════════════════════════════════════
             all_skills = []
             skills_data = self._parsed.get("skills", {})
+            
             if isinstance(skills_data, dict):
                 for cat in skills_data.values():
                     if isinstance(cat, list):
@@ -350,7 +383,10 @@ class SkillAnalyzerTool(MCPTool):
             elif isinstance(skills_data, list):
                 all_skills.extend(skills_data)
             
-            all_skills.extend(self._parsed.get("specializations", []))
+            # Add specializations
+            specs = self._parsed.get("specializations", [])
+            if isinstance(specs, list):
+                all_skills.extend(specs)
 
             # Extract from work history
             work_history = self._parsed.get("work_history", self._parsed.get("experience", []))
@@ -366,10 +402,14 @@ class SkillAnalyzerTool(MCPTool):
                 text_skills = self._extract_skills_from_text(self._resume_text)
                 all_skills.extend(text_skills)
 
-            # Deduplicate skills
-            all_skills = _deduplicate_list(all_skills)
+            # ═══════════════════════════════════════
+            # STEP 2: Deduplicate skills
+            # ═══════════════════════════════════════
+            all_skills = self._deduplicate_skills(all_skills)
 
-            # Categorize skills
+            # ═══════════════════════════════════════
+            # STEP 3: Categorize skills
+            # ═══════════════════════════════════════
             categorized_skills = {
                 "programming_languages": [],
                 "frameworks_libraries": [],
@@ -399,17 +439,27 @@ class SkillAnalyzerTool(MCPTool):
             
             # Deduplicate each category
             for cat in categorized_skills:
-                categorized_skills[cat] = _deduplicate_list(categorized_skills[cat])
+                categorized_skills[cat] = self._deduplicate_skills(categorized_skills[cat])
 
+            # ═══════════════════════════════════════
+            # STEP 4: Build result
+            # ═══════════════════════════════════════
             result_data = {
                 "candidate_name": self._parsed.get("name", ""),
                 "total_skills_found": len(all_skills),
                 "all_skills": all_skills,
                 "skills_by_category": categorized_skills,
-                "note": "All skills extracted directly from resume - no generated content"
             }
+            
+            # Add note based on what was found
+            if not all_skills:
+                result_data["note"] = "No skills found in the resume."
+            else:
+                result_data["note"] = "All skills extracted directly from resume - no fabricated information."
 
-            # ONLY do comparison if required_skills is provided
+            # ═══════════════════════════════════════
+            # STEP 5: Skill comparison (only if required_skills provided)
+            # ═══════════════════════════════════════
             if req_input:
                 required = [s.strip().lower() for s in req_input.replace("\n", ",").split(",") if s.strip()]
                 
@@ -449,9 +499,9 @@ class SkillAnalyzerTool(MCPTool):
 
                 result_data["skill_comparison"] = {
                     "match_percentage": pct,
-                    "matched_skills": _deduplicate_list(matched),
-                    "partial_matches": _deduplicate_list(partial),
-                    "missing_skills": _deduplicate_list(missing),
+                    "matched_skills": self._deduplicate_skills(matched),
+                    "partial_matches": self._deduplicate_skills(partial),
+                    "missing_skills": self._deduplicate_skills(missing),
                     "total_required": len(required),
                 }
             else:
