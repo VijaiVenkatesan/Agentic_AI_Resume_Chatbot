@@ -1,13 +1,13 @@
 """
 Bulk Resume Processor - Enterprise HR Feature
 Handles multiple resume uploads and batch JD matching
-Version: 2.0 - Full values, no truncation
+Version: 3.0 - With .DOC support & Deduplication
 """
 
 import time
 import json
 import re
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set
 from dataclasses import dataclass, field
 import pandas as pd
 
@@ -38,7 +38,7 @@ class CandidateResult:
     location_score: float = 0.0
     keyword_score: float = 0.0
     
-    # Details - NO LIMITS
+    # Details - NO LIMITS, but DEDUPLICATED
     matched_skills: List[str] = field(default_factory=list)
     missing_skills: List[str] = field(default_factory=list)
     strengths: List[str] = field(default_factory=list)
@@ -66,6 +66,71 @@ class BulkProcessingResult:
     candidates: List[CandidateResult] = field(default_factory=list)
     jd_summary: Dict = field(default_factory=dict)
 
+
+# ═══════════════════════════════════════════════════════════════
+#                    DEDUPLICATION UTILITIES
+# ═══════════════════════════════════════════════════════════════
+
+def _deduplicate_list(items: List[str]) -> List[str]:
+    """Remove duplicates from a list while preserving order"""
+    if not items:
+        return []
+    
+    seen: Set[str] = set()
+    result = []
+    
+    for item in items:
+        if not item:
+            continue
+        item_normalized = str(item).strip().lower()
+        if item_normalized and item_normalized not in seen:
+            seen.add(item_normalized)
+            result.append(str(item).strip())
+    
+    return result
+
+
+def _normalize_degree(degree: str) -> str:
+    """Normalize degree name for comparison"""
+    if not degree:
+        return ""
+    
+    degree_lower = degree.lower().strip()
+    
+    # Remove common prefixes/suffixes
+    degree_lower = re.sub(r'^(degree|diploma|certificate)\s*(in|of)?\s*', '', degree_lower)
+    degree_lower = re.sub(r'\s*(degree|diploma|certificate)$', '', degree_lower)
+    
+    # Normalize common variations
+    normalizations = {
+        r'b\.?tech|bachelor\s*of\s*technology|btech': 'btech',
+        r'm\.?tech|master\s*of\s*technology|mtech': 'mtech',
+        r'b\.?e\.?|bachelor\s*of\s*engineering': 'be',
+        r'm\.?e\.?|master\s*of\s*engineering': 'me',
+        r'b\.?sc\.?|bachelor\s*of\s*science|bsc': 'bsc',
+        r'm\.?sc\.?|master\s*of\s*science|msc': 'msc',
+        r'b\.?a\.?|bachelor\s*of\s*arts': 'ba',
+        r'm\.?a\.?|master\s*of\s*arts': 'ma',
+        r'b\.?com\.?|bachelor\s*of\s*commerce|bcom': 'bcom',
+        r'm\.?com\.?|master\s*of\s*commerce|mcom': 'mcom',
+        r'b\.?c\.?a\.?|bachelor\s*of\s*computer\s*applications?|bca': 'bca',
+        r'm\.?c\.?a\.?|master\s*of\s*computer\s*applications?|mca': 'mca',
+        r'b\.?b\.?a\.?|bachelor\s*of\s*business\s*administration|bba': 'bba',
+        r'm\.?b\.?a\.?|master\s*of\s*business\s*administration|mba': 'mba',
+        r'ph\.?d\.?|doctorate|doctor\s*of\s*philosophy': 'phd',
+    }
+    
+    for pattern, replacement in normalizations.items():
+        if re.search(pattern, degree_lower):
+            return replacement
+    
+    # Remove special characters for comparison
+    return re.sub(r'[^a-z0-9]', '', degree_lower)
+
+
+# ═══════════════════════════════════════════════════════════════
+#                    JD REQUIREMENTS EXTRACTION
+# ═══════════════════════════════════════════════════════════════
 
 def extract_jd_requirements(jd_text: str) -> Dict:
     """Extract key requirements from Job Description"""
@@ -186,6 +251,10 @@ def extract_jd_requirements(jd_text: str) -> Dict:
     return requirements
 
 
+# ═══════════════════════════════════════════════════════════════
+#                    MATCH SCORE CALCULATION
+# ═══════════════════════════════════════════════════════════════
+
 def calculate_match_scores(
     parsed_resume: Dict, 
     resume_text: str,
@@ -238,6 +307,7 @@ def calculate_match_scores(
                 if isinstance(techs, list):
                     all_skills.extend([t.lower().strip() for t in techs if t])
     
+    # Deduplicate skills
     all_skills = list(set(all_skills))
     
     required_skills = [s.lower().strip() for s in jd_requirements.get("required_skills", []) if s]
@@ -296,10 +366,11 @@ def calculate_match_scores(
                 else:
                     missing.append(req_skill)
         
-        scores["matched_skills"] = list(set(matched))
-        scores["missing_skills"] = list(set(missing))
+        # Deduplicate
+        scores["matched_skills"] = _deduplicate_list(matched)
+        scores["missing_skills"] = _deduplicate_list(missing)
         
-        match_ratio = len(matched) / len(required_skills) if required_skills else 0
+        match_ratio = len(scores["matched_skills"]) / len(required_skills) if required_skills else 0
         scores["skills_score"] = round(min(100, match_ratio * 110), 1)
     else:
         scores["skills_score"] = 70
@@ -429,45 +500,51 @@ def calculate_match_scores(
     scores["overall_score"] = min(100, scores["overall_score"])
     
     # ═══════════════════════════════════════
-    # IDENTIFY STRENGTHS & GAPS
+    # IDENTIFY STRENGTHS & GAPS (DEDUPLICATED)
     # ═══════════════════════════════════════
+    strengths = []
+    gaps = []
     
     if scores["skills_score"] >= 75:
-        scores["strengths"].append(f"Strong skill match ({scores['skills_score']:.0f}%)")
+        strengths.append(f"Strong skill match ({scores['skills_score']:.0f}%)")
     elif scores["skills_score"] >= 60:
-        scores["strengths"].append(f"Good skill alignment ({scores['skills_score']:.0f}%)")
+        strengths.append(f"Good skill alignment ({scores['skills_score']:.0f}%)")
     
     if scores["experience_score"] >= 90:
-        scores["strengths"].append(f"Experience exceeds requirements ({candidate_exp}y)")
+        strengths.append(f"Experience exceeds requirements ({candidate_exp}y)")
     elif scores["experience_score"] >= 75:
-        scores["strengths"].append(f"Experience meets requirements ({candidate_exp}y)")
+        strengths.append(f"Experience meets requirements ({candidate_exp}y)")
     
     if scores["education_score"] >= 85:
-        scores["strengths"].append("Education qualifications match well")
+        strengths.append("Education qualifications match well")
     
     if scores["location_score"] >= 90:
-        scores["strengths"].append("Location compatible")
+        strengths.append("Location compatible")
     
     if scores["keyword_score"] >= 70:
-        scores["strengths"].append("Good keyword/context match with JD")
+        strengths.append("Good keyword/context match with JD")
     
     if scores["skills_score"] < 50:
         missing_count = len(scores["missing_skills"])
-        scores["gaps"].append(f"Significant skill gaps ({missing_count} missing skills)")
+        gaps.append(f"Significant skill gaps ({missing_count} missing skills)")
     elif scores["skills_score"] < 65:
-        scores["gaps"].append(f"Some skill gaps detected")
+        gaps.append("Some skill gaps detected")
     
     if scores["experience_score"] < 60:
-        scores["gaps"].append(f"Experience gap ({candidate_exp}y vs {min_exp}y required)")
+        gaps.append(f"Experience gap ({candidate_exp}y vs {min_exp}y required)")
     
     if scores["education_score"] < 50:
-        scores["gaps"].append("Education may not meet requirements")
+        gaps.append("Education may not meet requirements")
     
     if scores["location_score"] < 60:
-        scores["gaps"].append("Location may not align with job requirements")
+        gaps.append("Location may not align with job requirements")
     
     if scores["keyword_score"] < 50:
-        scores["gaps"].append("Low keyword match - consider tailoring resume")
+        gaps.append("Low keyword match - consider tailoring resume")
+    
+    # Deduplicate
+    scores["strengths"] = _deduplicate_list(strengths)
+    scores["gaps"] = _deduplicate_list(gaps)
     
     # ═══════════════════════════════════════
     # RECOMMENDATION
@@ -487,169 +564,301 @@ def calculate_match_scores(
     return scores
 
 
+# ═══════════════════════════════════════════════════════════════
+#                    EDUCATION EXTRACTION (DEDUPLICATED)
+# ═══════════════════════════════════════════════════════════════
+
 def get_highest_education(parsed_resume: Dict) -> str:
-    """Extract highest education from parsed resume - FULL VALUE, NO TRUNCATION"""
+    """
+    Extract ONLY the highest education from parsed resume
+    Returns single highest degree - NO DUPLICATES
+    """
     education = parsed_resume.get("education", [])
     
     if not education:
         return "Not specified"
     
+    # Degree priority mapping (higher number = higher priority)
     degree_priority = {
-        "phd": 7, "ph.d": 7, "doctorate": 7, "doctor": 7,
-        "master": 6, "mba": 6, "m.tech": 6, "mtech": 6, "m.e": 6, "m.sc": 6, "mca": 6, "m.com": 6,
-        "bachelor": 5, "b.tech": 5, "btech": 5, "b.e": 5, "b.sc": 5, "bca": 5, "b.com": 5,
-        "associate": 4,
-        "diploma": 3,
-        "12th": 2, "hsc": 2, "higher secondary": 2, "intermediate": 2,
-        "10th": 1, "ssc": 1, "secondary": 1, "matriculation": 1,
+        # Doctorate
+        "phd": 10, "ph.d": 10, "ph.d.": 10, "doctorate": 10, "doctor": 10, "dphil": 10, "d.phil": 10,
+        
+        # Master's
+        "master": 8, "masters": 8, "mba": 8, "m.b.a": 8, "m.b.a.": 8,
+        "m.tech": 8, "mtech": 8, "m.e": 8, "m.e.": 8, "me": 8,
+        "m.sc": 8, "m.sc.": 8, "msc": 8, "m.s": 8, "m.s.": 8, "ms": 8,
+        "m.a": 8, "m.a.": 8, "ma": 8,
+        "mca": 8, "m.c.a": 8, "m.c.a.": 8,
+        "m.com": 8, "m.com.": 8, "mcom": 8,
+        "m.phil": 8, "mphil": 8,
+        "pgdm": 7, "pg diploma": 7, "post graduate diploma": 7, "pgd": 7,
+        
+        # Bachelor's
+        "bachelor": 6, "bachelors": 6,
+        "b.tech": 6, "btech": 6, "b.e": 6, "b.e.": 6, "be": 6,
+        "b.sc": 6, "b.sc.": 6, "bsc": 6, "b.s": 6, "b.s.": 6, "bs": 6,
+        "b.a": 6, "b.a.": 6, "ba": 6,
+        "bca": 6, "b.c.a": 6, "b.c.a.": 6,
+        "b.com": 6, "b.com.": 6, "bcom": 6,
+        "bba": 6, "b.b.a": 6, "b.b.a.": 6,
+        "b.arch": 6, "barch": 6,
+        "b.pharm": 6, "bpharm": 6,
+        "b.ed": 6, "bed": 6,
+        "llb": 6, "l.l.b": 6,
+        
+        # Associate/Diploma
+        "associate": 4, "associates": 4,
+        "diploma": 3, "polytechnic": 3,
+        "iti": 2, "i.t.i": 2,
+        
+        # School
+        "12th": 1, "hsc": 1, "higher secondary": 1, "intermediate": 1, "+2": 1, "plus two": 1, "xii": 1,
+        "10th": 0, "ssc": 0, "secondary": 0, "matriculation": 0, "x": 0, "matric": 0,
     }
     
-    highest = ""
-    highest_priority = 0
+    highest_edu = None
+    highest_priority = -1
+    
+    # Track seen degrees to avoid duplicates
+    seen_degrees: Set[str] = set()
     
     if isinstance(education, list):
         for edu in education:
-            if isinstance(edu, dict):
-                degree = edu.get("degree", "").lower()
-                
-                for key, priority in degree_priority.items():
-                    if key in degree:
-                        if priority > highest_priority:
-                            highest_priority = priority
-                            
-                            # Build FULL education string - NO TRUNCATION
-                            parts = []
-                            
-                            if edu.get("degree"):
-                                parts.append(edu.get("degree"))
-                            
-                            if edu.get("field") or edu.get("major") or edu.get("branch"):
-                                field = edu.get("field") or edu.get("major") or edu.get("branch")
-                                parts.append(f"in {field}")
-                            
-                            if edu.get("institution") or edu.get("university") or edu.get("college"):
-                                inst = edu.get("institution") or edu.get("university") or edu.get("college")
-                                parts.append(f"from {inst}")
-                            
-                            if edu.get("location"):
-                                parts.append(f"({edu.get('location')})")
-                            
-                            if edu.get("year") or edu.get("end_year") or edu.get("graduation_year"):
-                                year = edu.get("year") or edu.get("end_year") or edu.get("graduation_year")
-                                parts.append(f"[{year}]")
-                            
-                            if edu.get("gpa") or edu.get("cgpa") or edu.get("grade") or edu.get("percentage"):
-                                gpa = edu.get("gpa") or edu.get("cgpa") or edu.get("grade") or edu.get("percentage")
-                                parts.append(f"- GPA/Grade: {gpa}")
-                            
-                            highest = " ".join(parts)
-                        break
+            if not isinstance(edu, dict):
+                continue
+            
+            degree = str(edu.get("degree", "")).strip()
+            if not degree:
+                continue
+            
+            degree_lower = degree.lower()
+            
+            # Create a normalized key to detect duplicates
+            normalized_key = _normalize_degree(degree_lower)
+            if normalized_key in seen_degrees:
+                continue
+            seen_degrees.add(normalized_key)
+            
+            # Find priority for this degree
+            current_priority = -1
+            for key, priority in degree_priority.items():
+                if key in degree_lower:
+                    current_priority = max(current_priority, priority)
+            
+            # Update highest if this is higher priority
+            if current_priority > highest_priority:
+                highest_priority = current_priority
+                highest_edu = edu
     
-    return highest if highest else "Not specified"
+    if not highest_edu:
+        return "Not specified"
+    
+    # Build the education string - FULL VALUE, NO TRUNCATION
+    parts = []
+    
+    degree = highest_edu.get("degree", "")
+    if degree:
+        parts.append(degree)
+    
+    field = (
+        highest_edu.get("field") or 
+        highest_edu.get("major") or 
+        highest_edu.get("branch") or 
+        highest_edu.get("specialization", "")
+    )
+    if field:
+        parts.append(f"in {field}")
+    
+    institution = (
+        highest_edu.get("institution") or 
+        highest_edu.get("university") or 
+        highest_edu.get("college", "")
+    )
+    if institution:
+        parts.append(f"from {institution}")
+    
+    location = highest_edu.get("location", "")
+    if location:
+        parts.append(f"({location})")
+    
+    year = (
+        highest_edu.get("year") or 
+        highest_edu.get("end_year") or 
+        highest_edu.get("graduation_year", "")
+    )
+    if year:
+        parts.append(f"[{year}]")
+    
+    gpa = (
+        highest_edu.get("gpa") or 
+        highest_edu.get("cgpa") or 
+        highest_edu.get("grade") or 
+        highest_edu.get("percentage", "")
+    )
+    if gpa:
+        parts.append(f"- GPA/Grade: {gpa}")
+    
+    return " ".join(parts) if parts else "Not specified"
+
+
+def get_unique_education_list(parsed_resume: Dict) -> List[Dict]:
+    """
+    Get deduplicated list of education entries
+    Removes duplicates based on degree + institution combination
+    """
+    education = parsed_resume.get("education", [])
+    
+    if not education or not isinstance(education, list):
+        return []
+    
+    seen: Set[str] = set()
+    unique_education = []
+    
+    for edu in education:
+        if not isinstance(edu, dict):
+            continue
+        
+        degree = str(edu.get("degree", "")).strip()
+        institution = str(
+            edu.get("institution", "") or 
+            edu.get("university", "") or 
+            edu.get("college", "")
+        ).strip()
+        
+        if not degree:
+            continue
+        
+        # Create normalized key for deduplication
+        degree_normalized = _normalize_degree(degree)
+        institution_normalized = re.sub(r'[^a-z0-9]', '', institution.lower())[:30]
+        
+        key = f"{degree_normalized}_{institution_normalized}"
+        
+        if key in seen:
+            continue
+        
+        seen.add(key)
+        unique_education.append(edu)
+    
+    return unique_education
 
 
 def get_all_education_details(parsed_resume: Dict) -> str:
-    """Get ALL education entries as a formatted string - NO TRUNCATION"""
-    education = parsed_resume.get("education", [])
+    """
+    Get ALL unique education entries as a formatted string
+    NO DUPLICATES
+    """
+    unique_education = get_unique_education_list(parsed_resume)
     
-    if not education:
+    if not unique_education:
         return "Not specified"
     
     edu_entries = []
     
-    if isinstance(education, list):
-        for edu in education:
-            if isinstance(edu, dict):
-                parts = []
-                
-                if edu.get("degree"):
-                    parts.append(edu.get("degree"))
-                
-                if edu.get("field") or edu.get("major") or edu.get("branch"):
-                    field = edu.get("field") or edu.get("major") or edu.get("branch")
-                    parts.append(f"in {field}")
-                
-                if edu.get("institution") or edu.get("university") or edu.get("college"):
-                    inst = edu.get("institution") or edu.get("university") or edu.get("college")
-                    parts.append(f"from {inst}")
-                
-                if edu.get("location"):
-                    parts.append(f"({edu.get('location')})")
-                
-                if edu.get("year") or edu.get("end_year") or edu.get("graduation_year") or edu.get("start_year"):
-                    start = edu.get("start_year", "")
-                    end = edu.get("year") or edu.get("end_year") or edu.get("graduation_year", "")
-                    if start and end:
-                        parts.append(f"[{start} - {end}]")
-                    elif end:
-                        parts.append(f"[{end}]")
-                
-                if edu.get("gpa") or edu.get("cgpa") or edu.get("grade") or edu.get("percentage"):
-                    gpa = edu.get("gpa") or edu.get("cgpa") or edu.get("grade") or edu.get("percentage")
-                    parts.append(f"- GPA/Grade: {gpa}")
-                
-                if edu.get("achievements"):
-                    achievements = edu.get("achievements")
-                    if isinstance(achievements, list) and achievements:
-                        parts.append(f"- Achievements: {', '.join(achievements)}")
-                
-                if parts:
-                    edu_entries.append(" ".join(parts))
+    for edu in unique_education:
+        parts = []
+        
+        degree = edu.get("degree", "")
+        if degree:
+            parts.append(degree)
+        
+        field = edu.get("field") or edu.get("major") or edu.get("branch", "")
+        if field:
+            parts.append(f"in {field}")
+        
+        institution = edu.get("institution") or edu.get("university") or edu.get("college", "")
+        if institution:
+            parts.append(f"from {institution}")
+        
+        location = edu.get("location", "")
+        if location:
+            parts.append(f"({location})")
+        
+        year = edu.get("year") or edu.get("end_year") or edu.get("graduation_year", "")
+        start_year = edu.get("start_year", "")
+        if start_year and year:
+            parts.append(f"[{start_year} - {year}]")
+        elif year:
+            parts.append(f"[{year}]")
+        
+        gpa = edu.get("gpa") or edu.get("cgpa") or edu.get("grade") or edu.get("percentage", "")
+        if gpa:
+            parts.append(f"- GPA/Grade: {gpa}")
+        
+        if parts:
+            edu_entries.append(" ".join(parts))
     
     return " || ".join(edu_entries) if edu_entries else "Not specified"
 
 
+# ═══════════════════════════════════════════════════════════════
+#                    WORK HISTORY EXTRACTION
+# ═══════════════════════════════════════════════════════════════
+
 def get_all_work_history(parsed_resume: Dict) -> str:
-    """Get ALL work history entries as a formatted string - NO TRUNCATION"""
+    """Get ALL unique work history entries as a formatted string"""
     work_history = parsed_resume.get("work_history", parsed_resume.get("experience", []))
     
-    if not work_history:
+    if not work_history or not isinstance(work_history, list):
         return "Not specified"
     
     work_entries = []
+    seen: Set[str] = set()
     
-    if isinstance(work_history, list):
-        for job in work_history:
-            if isinstance(job, dict):
-                parts = []
-                
-                title = job.get("title") or job.get("role") or job.get("position", "")
-                if title:
-                    parts.append(title)
-                
-                company = job.get("company") or job.get("organization", "")
-                if company:
-                    parts.append(f"at {company}")
-                
-                location = job.get("location", "")
-                if location:
-                    parts.append(f"({location})")
-                
-                start_date = job.get("start_date") or job.get("from", "")
-                end_date = job.get("end_date") or job.get("to", "")
-                duration = job.get("duration", "")
-                
-                if start_date and end_date:
-                    parts.append(f"[{start_date} - {end_date}]")
-                elif duration:
-                    parts.append(f"[{duration}]")
-                
-                duration_years = job.get("duration_years") or job.get("years", "")
-                if duration_years:
-                    parts.append(f"({duration_years} years)")
-                
-                job_type = job.get("type", "")
-                if job_type:
-                    parts.append(f"- {job_type}")
-                
-                if parts:
-                    work_entries.append(" ".join(parts))
+    for job in work_history:
+        if not isinstance(job, dict):
+            continue
+        
+        title = job.get("title") or job.get("role") or job.get("position", "")
+        company = job.get("company") or job.get("organization", "")
+        
+        # Create key for deduplication
+        key = f"{title.lower().strip()}_{company.lower().strip()}"[:60]
+        if key in seen:
+            continue
+        seen.add(key)
+        
+        parts = []
+        
+        if title:
+            parts.append(title)
+        
+        if company:
+            parts.append(f"at {company}")
+        
+        location = job.get("location", "")
+        if location:
+            parts.append(f"({location})")
+        
+        start_date = job.get("start_date") or job.get("from", "")
+        end_date = job.get("end_date") or job.get("to", "")
+        duration = job.get("duration", "")
+        
+        if start_date and end_date:
+            parts.append(f"[{start_date} - {end_date}]")
+        elif duration:
+            parts.append(f"[{duration}]")
+        
+        duration_years = job.get("duration_years") or job.get("years", "")
+        if duration_years:
+            parts.append(f"({duration_years} years)")
+        
+        job_type = job.get("type", "")
+        if job_type:
+            parts.append(f"- {job_type}")
+        
+        if parts:
+            work_entries.append(" ".join(parts))
     
     return " || ".join(work_entries) if work_entries else "Not specified"
 
 
+# ═══════════════════════════════════════════════════════════════
+#                    SKILLS EXTRACTION
+# ═══════════════════════════════════════════════════════════════
+
 def get_all_skills(parsed_resume: Dict) -> str:
-    """Get ALL skills as a formatted string - NO TRUNCATION"""
+    """Get ALL unique skills as a formatted string"""
     all_skills = []
     
     skills_data = parsed_resume.get("skills", {})
@@ -675,126 +884,66 @@ def get_all_skills(parsed_resume: Dict) -> str:
                 if isinstance(techs, list):
                     all_skills.extend(techs)
     
-    # Deduplicate while preserving order
-    seen = set()
-    unique_skills = []
-    for skill in all_skills:
-        if skill and skill.lower() not in seen:
-            seen.add(skill.lower())
-            unique_skills.append(skill)
+    # Deduplicate
+    unique_skills = _deduplicate_list(all_skills)
     
     return ", ".join(unique_skills) if unique_skills else "Not specified"
 
 
+# ═══════════════════════════════════════════════════════════════
+#                    CERTIFICATIONS EXTRACTION
+# ═══════════════════════════════════════════════════════════════
+
 def get_all_certifications(parsed_resume: Dict) -> str:
-    """Get ALL certifications as a formatted string - NO TRUNCATION"""
+    """Get ALL unique certifications as a formatted string"""
     certifications = parsed_resume.get("certifications", [])
     
-    if not certifications:
+    if not certifications or not isinstance(certifications, list):
         return "Not specified"
     
     cert_entries = []
+    seen: Set[str] = set()
     
-    if isinstance(certifications, list):
-        for cert in certifications:
-            if isinstance(cert, dict):
-                parts = []
-                
-                name = cert.get("name", "")
-                if name:
-                    parts.append(name)
-                
-                provider = cert.get("provider") or cert.get("issuer") or cert.get("organization", "")
-                if provider:
-                    parts.append(f"by {provider}")
-                
-                date = cert.get("date") or cert.get("issue_date") or cert.get("year", "")
-                if date:
-                    parts.append(f"({date})")
-                
-                credential_id = cert.get("credential_id") or cert.get("id", "")
-                if credential_id:
-                    parts.append(f"[ID: {credential_id}]")
-                
-                if parts:
-                    cert_entries.append(" ".join(parts))
+    for cert in certifications:
+        if isinstance(cert, dict):
+            name = cert.get("name", "")
+            if not name:
+                continue
             
-            elif isinstance(cert, str) and cert:
+            # Deduplication key
+            key = name.lower().strip()[:50]
+            if key in seen:
+                continue
+            seen.add(key)
+            
+            parts = [name]
+            
+            provider = cert.get("provider") or cert.get("issuer") or cert.get("organization", "")
+            if provider:
+                parts.append(f"by {provider}")
+            
+            date = cert.get("date") or cert.get("issue_date") or cert.get("year", "")
+            if date:
+                parts.append(f"({date})")
+            
+            credential_id = cert.get("credential_id") or cert.get("id", "")
+            if credential_id:
+                parts.append(f"[ID: {credential_id}]")
+            
+            cert_entries.append(" ".join(parts))
+        
+        elif isinstance(cert, str) and cert:
+            key = cert.lower().strip()[:50]
+            if key not in seen:
+                seen.add(key)
                 cert_entries.append(cert)
     
     return " || ".join(cert_entries) if cert_entries else "Not specified"
-    
-
-def _extract_email_from_text(text: str) -> str:
-    """Extract email from text using multiple patterns"""
-    patterns = [
-        r'[\w._%+-]+@[\w.-]+\.[a-zA-Z]{2,}',
-        r'[\w._%+-]+\s*@\s*[\w.-]+\s*\.\s*[a-zA-Z]{2,}',
-        r'[\w._%+-]+\[at\][\w.-]+\.[a-zA-Z]{2,}',
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            email = match.group(0).strip()
-            email = re.sub(r'\s+', '', email)
-            email = re.sub(r'\[at\]|\(at\)', '@', email, flags=re.IGNORECASE)
-            return email
-    
-    return ""
 
 
-def _extract_phone_from_text(text: str) -> str:
-    """Extract phone from text using multiple patterns"""
-    patterns = [
-        r'\+\d{1,3}[-.\s]?\(?\d{2,5}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}',
-        r'\+\d{1,3}[-.\s]?\d{4,5}[-.\s]?\d{5,6}',
-        r'\+\d{10,15}',
-        r'\+91[-.\s]?\d{5}[-.\s]?\d{5}',
-        r'\+91[-.\s]?\d{10}',
-        r'\(\d{3}\)\s*\d{3}[-.\s]?\d{4}',
-        r'\d{3}[-.\s]\d{3}[-.\s]\d{4}',
-        r'\b\d{10,12}\b',
-    ]
-    
-    for pattern in patterns:
-        matches = re.findall(pattern, text, re.IGNORECASE)
-        for match in matches:
-            cleaned = match.strip()
-            digits = re.sub(r'[^\d]', '', cleaned)
-            if 10 <= len(digits) <= 15:
-                return cleaned
-    
-    return ""
-
-
-def _extract_location_from_text(text: str) -> str:
-    """Extract location from text"""
-    # Common cities
-    cities = [
-        'Bangalore', 'Bengaluru', 'Mumbai', 'Delhi', 'Chennai', 'Hyderabad',
-        'Pune', 'Kolkata', 'Noida', 'Gurgaon', 'Gurugram', 'Ahmedabad',
-        'New York', 'San Francisco', 'Seattle', 'Austin', 'Boston', 'Chicago',
-        'Los Angeles', 'London', 'Berlin', 'Singapore', 'Dubai', 'Toronto'
-    ]
-    
-    text_lower = text.lower()
-    
-    for city in cities:
-        if city.lower() in text_lower:
-            # Try to get more context (city, state/country)
-            pattern = rf'\b{city}\b[,\s]*[\w\s]{{0,30}}'
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                location = match.group(0).strip()
-                # Clean up
-                location = re.sub(r'\s+', ' ', location)
-                if len(location) < 50:
-                    return location
-            return city
-    
-    return ""
-    
+# ═══════════════════════════════════════════════════════════════
+#                    SINGLE RESUME PROCESSING
+# ═══════════════════════════════════════════════════════════════
 
 def process_single_resume_for_bulk(
     file_data: Dict,
@@ -804,9 +953,8 @@ def process_single_resume_for_bulk(
     model_id: str
 ) -> CandidateResult:
     """
-    Process a single resume in bulk mode - Enhanced extraction
-    Uses multiple extraction strategies for maximum accuracy
-    NO TRUNCATION on any field
+    Process a single resume in bulk mode
+    Enhanced extraction with deduplication
     """
     start_time = time.time()
     
@@ -832,9 +980,7 @@ def process_single_resume_for_bulk(
                 processing_time=round(time.time() - start_time, 2)
             )
         
-        # ═══════════════════════════════════════════════════════════
-        # STEP 1: Get pre-extracted contacts from document processor
-        # ═══════════════════════════════════════════════════════════
+        # Get pre-extracted contacts from document processor
         doc_contacts = file_data.get("extracted_contacts", {})
         
         # If not available, extract now
@@ -845,13 +991,11 @@ def process_single_resume_for_bulk(
             except ImportError:
                 doc_contacts = {}
         
-        # ═══════════════════════════════════════════════════════════
-        # STEP 2: Parse resume with LLM
-        # ═══════════════════════════════════════════════════════════
+        # Parse resume with LLM
         try:
             parsed = parse_resume_with_llm(resume_text, groq_api_key, model_id)
         except Exception as parse_error:
-            # If LLM parsing fails, create basic parsed structure from doc_contacts
+            # If LLM parsing fails, create basic parsed structure
             parsed = {
                 "name": doc_contacts.get("name", ""),
                 "email": doc_contacts.get("email", ""),
@@ -870,28 +1014,21 @@ def process_single_resume_for_bulk(
                 "professional_summary": resume_text[:500] if resume_text else ""
             }
         
-        # ═══════════════════════════════════════════════════════════
-        # STEP 3: Enhanced contact merging - Fill gaps from doc_contacts
-        # ═══════════════════════════════════════════════════════════
-        
-        # Name - try multiple sources
+        # Enhanced contact merging
         candidate_name = _get_best_name(parsed, doc_contacts, file_name, resume_text)
         
-        # Email - use best available
         email = _get_best_value(
             parsed.get("email", ""),
             doc_contacts.get("email", ""),
             validator=lambda x: "@" in x and "." in x
         )
         
-        # Phone - use best available
         phone = _get_best_value(
             parsed.get("phone", ""),
             doc_contacts.get("phone", ""),
             validator=lambda x: len(re.sub(r'[^\d]', '', x)) >= 10
         )
         
-        # Location - combine location and address
         location = _get_best_value(
             parsed.get("location", ""),
             doc_contacts.get("location", ""),
@@ -899,38 +1036,16 @@ def process_single_resume_for_bulk(
             doc_contacts.get("address", "")
         )
         
-        # LinkedIn
-        linkedin = _get_best_value(
-            parsed.get("linkedin", ""),
-            doc_contacts.get("linkedin", ""),
-            validator=lambda x: "linkedin" in x.lower()
-        )
-        
-        # GitHub
-        github = _get_best_value(
-            parsed.get("github", ""),
-            doc_contacts.get("github", ""),
-            validator=lambda x: "github" in x.lower()
-        )
-        
         # Update parsed with best values
         parsed["name"] = candidate_name
         parsed["email"] = email
         parsed["phone"] = phone
         parsed["location"] = location
-        parsed["linkedin"] = linkedin
-        parsed["github"] = github
         
-        # ═══════════════════════════════════════════════════════════
-        # STEP 4: Calculate match scores
-        # ═══════════════════════════════════════════════════════════
+        # Calculate match scores
         scores = calculate_match_scores(parsed, resume_text, jd_text, jd_requirements)
         
-        # ═══════════════════════════════════════════════════════════
-        # STEP 5: Extract additional details
-        # ═══════════════════════════════════════════════════════════
-        
-        # Current role and company
+        # Extract additional details
         current_role = parsed.get("current_role", "")
         current_company = parsed.get("current_company", "")
         
@@ -938,7 +1053,6 @@ def process_single_resume_for_bulk(
         if not current_role or not current_company:
             work_history = parsed.get("work_history", parsed.get("experience", []))
             if isinstance(work_history, list) and work_history:
-                # Get first (most recent) job
                 first_job = work_history[0] if isinstance(work_history[0], dict) else {}
                 
                 if not current_role:
@@ -974,41 +1088,42 @@ def process_single_resume_for_bulk(
                         except (ValueError, TypeError):
                             pass
         
-        # ═══════════════════════════════════════════════════════════
-        # STEP 6: Build result - NO TRUNCATION on any field
-        # ═══════════════════════════════════════════════════════════
+        # Get deduplicated highest education
+        highest_education = get_highest_education(parsed)
+        
+        # Build result - ALL DEDUPLICATED
         result = CandidateResult(
             file_name=file_name,
             candidate_name=candidate_name,
             email=email,
             phone=phone,
-            location=location,  # FULL VALUE
-            current_role=current_role,  # FULL VALUE
-            current_company=current_company,  # FULL VALUE
+            location=location,
+            current_role=current_role,
+            current_company=current_company,
             total_experience=round(total_exp, 1),
-            highest_education=get_highest_education(parsed),  # FULL VALUE
+            highest_education=highest_education,
             overall_score=scores["overall_score"],
             skills_score=scores["skills_score"],
             experience_score=scores["experience_score"],
             education_score=scores["education_score"],
             location_score=scores["location_score"],
             keyword_score=scores["keyword_score"],
-            matched_skills=scores["matched_skills"],  # ALL skills - no limit
-            missing_skills=scores["missing_skills"],  # ALL skills - no limit
-            strengths=scores["strengths"],  # ALL
-            gaps=scores["gaps"],  # ALL
+            matched_skills=scores["matched_skills"],  # Already deduplicated
+            missing_skills=scores["missing_skills"],  # Already deduplicated
+            strengths=scores["strengths"],  # Already deduplicated
+            gaps=scores["gaps"],  # Already deduplicated
             recommendation=scores["recommendation"],
             processing_time=round(time.time() - start_time, 2),
             success=True,
-            parsed_resume=parsed,  # Store full parsed data
-            resume_text=resume_text  # Store full text
+            parsed_resume=parsed,
+            resume_text=resume_text
         )
         
         return result
         
     except Exception as e:
         import traceback
-        error_detail = f"{str(e)}\n{traceback.format_exc()}"
+        error_msg = str(e)
         
         return CandidateResult(
             file_name=file_name,
@@ -1021,21 +1136,17 @@ def process_single_resume_for_bulk(
             total_experience=0,
             highest_education="",
             success=False,
-            error=str(e),  # Keep error message
+            error=error_msg,
             processing_time=round(time.time() - start_time, 2)
         )
 
 
 def _get_best_name(parsed: Dict, doc_contacts: Dict, file_name: str, resume_text: str) -> str:
-    """
-    Get the best candidate name from multiple sources
-    Priority: Valid parsed > Valid doc_contacts > Extracted from text > Filename
-    """
-    # List of invalid/placeholder names
+    """Get the best candidate name from multiple sources"""
     invalid_names = [
         "", "n/a", "na", "none", "unknown", "candidate", "your name",
         "first last", "firstname lastname", "name", "full name",
-        "[name]", "<name>", "null", "-", "—"
+        "[name]", "<name>", "(name)", "enter name", "type name",
     ]
     
     def is_valid_name(name: str) -> bool:
@@ -1044,14 +1155,12 @@ def _get_best_name(parsed: Dict, doc_contacts: Dict, file_name: str, resume_text
         name_lower = name.lower().strip()
         if name_lower in invalid_names:
             return False
-        # Should have at least 2 parts and be mostly alphabetic
         words = name.split()
         if len(words) < 2:
             return False
         alpha_chars = sum(1 for c in name if c.isalpha() or c.isspace())
         if alpha_chars / max(len(name), 1) < 0.8:
             return False
-        # Each word should be reasonable length
         if not all(1 <= len(w) <= 20 for w in words):
             return False
         return True
@@ -1066,7 +1175,7 @@ def _get_best_name(parsed: Dict, doc_contacts: Dict, file_name: str, resume_text
     if is_valid_name(doc_name):
         return doc_name
     
-    # Try to extract from resume text using patterns
+    # Try to extract from resume text
     try:
         from document_processor import extract_name_from_text
         extracted_name = extract_name_from_text(resume_text)
@@ -1075,17 +1184,15 @@ def _get_best_name(parsed: Dict, doc_contacts: Dict, file_name: str, resume_text
     except ImportError:
         pass
     
-    # Try extracting from first few lines of resume
+    # Try extracting from first few lines
     lines = resume_text.strip().split('\n')[:10]
     for line in lines:
         line = line.strip()
-        # Skip empty lines and lines with common non-name content
         if not line or len(line) < 4 or len(line) > 50:
             continue
         if '@' in line or any(c.isdigit() for c in line[:5]):
             continue
         
-        # Check if line looks like a name (2-4 capitalized words)
         words = line.split()
         if 2 <= len(words) <= 4:
             if all(w[0].isupper() for w in words if w):
@@ -1097,8 +1204,6 @@ def _get_best_name(parsed: Dict, doc_contacts: Dict, file_name: str, resume_text
     name_from_file = file_name.rsplit(".", 1)[0]
     name_from_file = re.sub(r'[_\-]', ' ', name_from_file)
     name_from_file = re.sub(r'\s+', ' ', name_from_file).strip().title()
-    
-    # Clean up common file name patterns
     name_from_file = re.sub(r'(?i)\s*(resume|cv|curriculum|vitae)\s*', ' ', name_from_file)
     name_from_file = re.sub(r'\s+', ' ', name_from_file).strip()
     
@@ -1109,10 +1214,7 @@ def _get_best_name(parsed: Dict, doc_contacts: Dict, file_name: str, resume_text
 
 
 def _get_best_value(*values, validator=None) -> str:
-    """
-    Get the best non-empty value from multiple sources
-    Optionally validate with a custom validator function
-    """
+    """Get the best non-empty value from multiple sources"""
     for value in values:
         if value and isinstance(value, str):
             value = value.strip()
@@ -1121,6 +1223,10 @@ def _get_best_value(*values, validator=None) -> str:
                     return value
     return ""
 
+
+# ═══════════════════════════════════════════════════════════════
+#                    BULK PROCESSING
+# ═══════════════════════════════════════════════════════════════
 
 def process_bulk_resumes(
     uploaded_files: List,
@@ -1131,16 +1237,6 @@ def process_bulk_resumes(
 ) -> BulkProcessingResult:
     """
     Process multiple resumes and match against JD
-    
-    Args:
-        uploaded_files: List of Streamlit UploadedFile objects
-        jd_text: Job description text
-        groq_api_key: Groq API key
-        model_id: Model ID to use
-        progress_callback: Optional callback(current, total, message)
-    
-    Returns:
-        BulkProcessingResult with all candidates ranked
     """
     start_time = time.time()
     total = len(uploaded_files)
@@ -1152,7 +1248,7 @@ def process_bulk_resumes(
     successful = 0
     failed = 0
     
-    # Process files sequentially (to avoid rate limits)
+    # Process files sequentially
     for i, uploaded_file in enumerate(uploaded_files):
         if progress_callback:
             progress_callback(i + 1, total, f"Processing {uploaded_file.name}...")
@@ -1242,11 +1338,27 @@ def process_bulk_resumes(
     )
 
 
+# ═══════════════════════════════════════════════════════════════
+#                    EXPORT FUNCTIONS
+# ═══════════════════════════════════════════════════════════════
+
 def results_to_dataframe(result: BulkProcessingResult) -> pd.DataFrame:
-    """Convert bulk processing results to a pandas DataFrame - FULL VALUES, NO TRUNCATION"""
+    """Convert bulk processing results to a pandas DataFrame - DEDUPLICATED"""
     data = []
     
     for candidate in result.candidates:
+        # Get deduplicated highest education
+        if candidate.success:
+            education_text = candidate.highest_education
+        else:
+            education_text = ""
+        
+        # Deduplicate skills for display
+        matched_skills = _deduplicate_list(candidate.matched_skills)
+        missing_skills = _deduplicate_list(candidate.missing_skills)
+        strengths = _deduplicate_list(candidate.strengths)
+        gaps = _deduplicate_list(candidate.gaps)
+        
         row = {
             "Rank": candidate.rank if candidate.success else "-",
             "Candidate Name": candidate.candidate_name,
@@ -1257,16 +1369,16 @@ def results_to_dataframe(result: BulkProcessingResult) -> pd.DataFrame:
             "Location Match": f"{candidate.location_score}%" if candidate.success else "-",
             "Keyword Match": f"{candidate.keyword_score}%" if candidate.success else "-",
             "Experience (Years)": candidate.total_experience if candidate.success else "-",
-            "Current Role": candidate.current_role,  # FULL VALUE
-            "Company": candidate.current_company,  # FULL VALUE
+            "Current Role": candidate.current_role,
+            "Company": candidate.current_company,
             "Email": candidate.email,
             "Phone": candidate.phone,
-            "Location": candidate.location,  # FULL VALUE
-            "Education": candidate.highest_education,  # FULL VALUE
-            "Matched Skills": ", ".join(candidate.matched_skills) if candidate.matched_skills else "",  # ALL SKILLS
-            "Missing Skills": ", ".join(candidate.missing_skills) if candidate.missing_skills else "",  # ALL SKILLS
-            "Strengths": " | ".join(candidate.strengths) if candidate.strengths else "",  # FULL VALUE
-            "Gaps": " | ".join(candidate.gaps) if candidate.gaps else "",  # FULL VALUE
+            "Location": candidate.location,
+            "Highest Education": education_text,
+            "Matched Skills": ", ".join(matched_skills),
+            "Missing Skills": ", ".join(missing_skills),
+            "Strengths": " | ".join(strengths),
+            "Gaps": " | ".join(gaps),
             "Recommendation": candidate.recommendation if candidate.success else f"Error: {candidate.error}",
             "File Name": candidate.file_name,
             "Processing Time (s)": candidate.processing_time if candidate.success else "-",
@@ -1278,24 +1390,22 @@ def results_to_dataframe(result: BulkProcessingResult) -> pd.DataFrame:
 
 
 def export_results_to_excel(result: BulkProcessingResult) -> bytes:
-    """Export bulk processing results to Excel file - FULL VALUES, NO TRUNCATION"""
+    """Export bulk processing results to Excel file - DEDUPLICATED"""
     import io
     
     df = results_to_dataframe(result)
     
-    # Create Excel file in memory
     output = io.BytesIO()
     
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         # ══════════════════════════════════════════════════════
-        # SHEET 1: CANDIDATE RANKINGS (Main comparison table)
+        # SHEET 1: CANDIDATE RANKINGS
         # ══════════════════════════════════════════════════════
         df.to_excel(writer, sheet_name='Candidate Rankings', index=False)
         
         workbook = writer.book
         worksheet = writer.sheets['Candidate Rankings']
         
-        # Define formats
         header_format = workbook.add_format({
             'bold': True,
             'bg_color': '#4338ca',
@@ -1311,26 +1421,47 @@ def export_results_to_excel(result: BulkProcessingResult) -> bytes:
             'valign': 'top'
         })
         
-        # Apply header format
         for col_num, value in enumerate(df.columns.values):
             worksheet.write(0, col_num, value, header_format)
         
-        # Auto-calculate column widths based on content
         for i, col in enumerate(df.columns):
             max_content_length = df[col].astype(str).apply(len).max()
             header_length = len(col)
             width = max(header_length, min(max_content_length, 100)) + 2
             worksheet.set_column(i, i, width, wrap_format)
         
-        # Freeze top row and first column
         worksheet.freeze_panes(1, 1)
         
         # ══════════════════════════════════════════════════════
-        # SHEET 2: DETAILED CANDIDATE INFO (Extended data)
+        # SHEET 2: DETAILED CANDIDATE INFO (DEDUPLICATED)
         # ══════════════════════════════════════════════════════
         detailed_data = []
         for candidate in result.candidates:
             if candidate.success:
+                # Get UNIQUE skills
+                unique_skills = get_all_skills(candidate.parsed_resume)
+                
+                # Get UNIQUE work history
+                work_summary = get_all_work_history(candidate.parsed_resume)
+                
+                # Get UNIQUE education
+                education_full = get_all_education_details(candidate.parsed_resume)
+                
+                # Get UNIQUE certifications
+                certifications = get_all_certifications(candidate.parsed_resume)
+                
+                # Deduplicate other fields
+                specializations = _deduplicate_list(candidate.parsed_resume.get("specializations", []))
+                languages = _deduplicate_list(candidate.parsed_resume.get("languages", []))
+                
+                awards = []
+                for a in candidate.parsed_resume.get("awards", []):
+                    if isinstance(a, dict):
+                        awards.append(a.get("name", str(a)))
+                    else:
+                        awards.append(str(a))
+                awards = _deduplicate_list(awards)
+                
                 detailed_data.append({
                     "Rank": candidate.rank,
                     "Candidate Name": candidate.candidate_name,
@@ -1350,20 +1481,17 @@ def export_results_to_excel(result: BulkProcessingResult) -> bytes:
                     "Total Experience (Years)": candidate.total_experience,
                     "Current Role": candidate.current_role,
                     "Current Company": candidate.current_company,
-                    "All Skills": get_all_skills(candidate.parsed_resume),
-                    "Work History (Full)": get_all_work_history(candidate.parsed_resume),
-                    "Education (Full)": get_all_education_details(candidate.parsed_resume),
-                    "Certifications (Full)": get_all_certifications(candidate.parsed_resume),
-                    "Specializations": ", ".join(candidate.parsed_resume.get("specializations", [])),
-                    "Awards": ", ".join([
-                        a.get("name", str(a)) if isinstance(a, dict) else str(a) 
-                        for a in candidate.parsed_resume.get("awards", [])
-                    ]),
-                    "Languages": ", ".join(candidate.parsed_resume.get("languages", [])),
-                    "Matched Skills": ", ".join(candidate.matched_skills),
-                    "Missing Skills": ", ".join(candidate.missing_skills),
-                    "Strengths": " | ".join(candidate.strengths),
-                    "Gaps": " | ".join(candidate.gaps),
+                    "All Skills (Unique)": unique_skills,
+                    "Work History": work_summary,
+                    "Education (Full - Unique)": education_full,
+                    "Certifications": certifications,
+                    "Specializations": ", ".join(specializations),
+                    "Awards": ", ".join(awards),
+                    "Languages": ", ".join(languages),
+                    "Matched Skills": ", ".join(_deduplicate_list(candidate.matched_skills)),
+                    "Missing Skills": ", ".join(_deduplicate_list(candidate.missing_skills)),
+                    "Strengths": " | ".join(_deduplicate_list(candidate.strengths)),
+                    "Gaps": " | ".join(_deduplicate_list(candidate.gaps)),
                     "Recommendation": candidate.recommendation,
                     "File Name": candidate.file_name,
                     "Processing Time (s)": candidate.processing_time,
@@ -1378,7 +1506,6 @@ def export_results_to_excel(result: BulkProcessingResult) -> bytes:
             for col_num, value in enumerate(detailed_df.columns.values):
                 detailed_worksheet.write(0, col_num, value, header_format)
             
-            # Set column widths for detailed sheet
             for i, col in enumerate(detailed_df.columns):
                 max_content_length = detailed_df[col].astype(str).apply(len).max()
                 header_length = len(col)
@@ -1390,13 +1517,18 @@ def export_results_to_excel(result: BulkProcessingResult) -> bytes:
         # ══════════════════════════════════════════════════════
         # SHEET 3: JD REQUIREMENTS
         # ══════════════════════════════════════════════════════
+        jd_skills = _deduplicate_list(result.jd_summary.get("required_skills", []))
+        jd_edu = _deduplicate_list(result.jd_summary.get("required_education", []))
+        jd_locations = _deduplicate_list(result.jd_summary.get("preferred_locations", []))
+        jd_keywords = _deduplicate_list(result.jd_summary.get("keywords", []))
+        
         jd_data = [
-            {"Category": "Required Skills", "Details": ", ".join(result.jd_summary.get("required_skills", [])) or "Not specified"},
+            {"Category": "Required Skills", "Details": ", ".join(jd_skills) or "Not specified"},
             {"Category": "Min Experience (Years)", "Details": str(result.jd_summary.get("min_experience_years", 0))},
             {"Category": "Max Experience (Years)", "Details": str(result.jd_summary.get("max_experience_years", "Not specified")) if result.jd_summary.get("max_experience_years", 99) < 99 else "Not specified"},
-            {"Category": "Required Education", "Details": ", ".join(result.jd_summary.get("required_education", [])) or "Not specified"},
-            {"Category": "Preferred Locations", "Details": ", ".join(result.jd_summary.get("preferred_locations", [])) or "Not specified"},
-            {"Category": "Key Keywords", "Details": ", ".join(result.jd_summary.get("keywords", [])) or "Not specified"},
+            {"Category": "Required Education", "Details": ", ".join(jd_edu) or "Not specified"},
+            {"Category": "Preferred Locations", "Details": ", ".join(jd_locations) or "Not specified"},
+            {"Category": "Key Keywords", "Details": ", ".join(jd_keywords) or "Not specified"},
         ]
         
         jd_df = pd.DataFrame(jd_data)
@@ -1415,6 +1547,8 @@ def export_results_to_excel(result: BulkProcessingResult) -> bytes:
         avg_score = sum(c.overall_score for c in result.candidates if c.success) / max(result.successful, 1)
         top_candidate = result.candidates[0] if result.candidates and result.candidates[0].success else None
         
+        min_score = min((c.overall_score for c in result.candidates if c.success), default=0)
+        
         summary_data = [
             {"Metric": "Report Generated", "Value": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")},
             {"Metric": "", "Value": ""},
@@ -1427,7 +1561,7 @@ def export_results_to_excel(result: BulkProcessingResult) -> bytes:
             {"Metric": "=== SCORE SUMMARY ===", "Value": ""},
             {"Metric": "Average Match Score", "Value": f"{avg_score:.1f}%"},
             {"Metric": "Highest Score", "Value": f"{top_candidate.overall_score}%" if top_candidate else "N/A"},
-            {"Metric": "Lowest Score (successful)", "Value": f"{min(c.overall_score for c in result.candidates if c.success):.1f}%" if result.successful > 0 else "N/A"},
+            {"Metric": "Lowest Score (successful)", "Value": f"{min_score:.1f}%" if result.successful > 0 else "N/A"},
             {"Metric": "", "Value": ""},
             {"Metric": "=== TOP CANDIDATE ===", "Value": ""},
             {"Metric": "Name", "Value": top_candidate.candidate_name if top_candidate else "N/A"},
@@ -1455,7 +1589,7 @@ def export_results_to_excel(result: BulkProcessingResult) -> bytes:
             summary_worksheet.write(0, col_num, value, header_format)
         
         # ══════════════════════════════════════════════════════
-        # SHEET 5: FAILED FILES (if any)
+        # SHEET 5: FAILED FILES
         # ══════════════════════════════════════════════════════
         failed_candidates = [c for c in result.candidates if not c.success]
         if failed_candidates:
@@ -1482,13 +1616,13 @@ def export_results_to_excel(result: BulkProcessingResult) -> bytes:
 
 
 def export_results_to_csv(result: BulkProcessingResult) -> str:
-    """Export bulk processing results to CSV string - FULL VALUES"""
+    """Export bulk processing results to CSV string - DEDUPLICATED"""
     df = results_to_dataframe(result)
     return df.to_csv(index=False)
 
 
 def export_detailed_results_to_csv(result: BulkProcessingResult) -> str:
-    """Export detailed results to CSV with all fields - FULL VALUES"""
+    """Export detailed results to CSV with all fields - DEDUPLICATED"""
     detailed_data = []
     
     for candidate in result.candidates:
@@ -1515,10 +1649,10 @@ def export_detailed_results_to_csv(result: BulkProcessingResult) -> str:
                 "Work History": get_all_work_history(candidate.parsed_resume),
                 "Education (Full)": get_all_education_details(candidate.parsed_resume),
                 "Certifications": get_all_certifications(candidate.parsed_resume),
-                "Matched Skills": ", ".join(candidate.matched_skills),
-                "Missing Skills": ", ".join(candidate.missing_skills),
-                "Strengths": " | ".join(candidate.strengths),
-                "Gaps": " | ".join(candidate.gaps),
+                "Matched Skills": ", ".join(_deduplicate_list(candidate.matched_skills)),
+                "Missing Skills": ", ".join(_deduplicate_list(candidate.missing_skills)),
+                "Strengths": " | ".join(_deduplicate_list(candidate.strengths)),
+                "Gaps": " | ".join(_deduplicate_list(candidate.gaps)),
                 "Recommendation": candidate.recommendation,
                 "File Name": candidate.file_name,
             })
