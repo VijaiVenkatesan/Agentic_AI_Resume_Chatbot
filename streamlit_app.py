@@ -1158,83 +1158,103 @@ if st.session_state.bulk_mode:
             f"🟠 Moderate (<65%)"
         ])
         
-        def display_candidate_cards(candidates_list):
-            if not candidates_list:
-                st.info("No candidates in this category")
-                return
-            
-            for candidate in candidates_list:
-                if not candidate.success:
-                    continue
-                
-                score_class = get_score_class(candidate.overall_score)
-                rank_class = get_rank_class(candidate.rank)
-                
-                with st.container():
-                    st.markdown(f"""
-                        <div class="candidate-card">
-                            <div style="display: flex; align-items: center; margin-bottom: 12px;">
-                                <span class="candidate-rank {rank_class}">#{candidate.rank}</span>
-                                <div style="flex: 1;">
-                                    <strong style="font-size: 1.1rem; color: #f1f5f9;">{candidate.candidate_name}</strong>
-                                    <p style="margin: 2px 0; color: #94a3b8; font-size: 0.85rem;">
-                                        {candidate.current_role} {f'at {candidate.current_company}' if candidate.current_company else ''}
-                                    </p>
-                                </div>
-                                <span class="score-badge {score_class}">{candidate.overall_score}%</span>
-                            </div>
-                            <div class="score-breakdown">
-                                <span class="mini-score">🎯 Skills: {candidate.skills_score}%</span>
-                                <span class="mini-score">💼 Exp: {candidate.experience_score}%</span>
-                                <span class="mini-score">🎓 Edu: {candidate.education_score}%</span>
-                                <span class="mini-score">📍 Location: {candidate.location_score}%</span>
-                                <span class="mini-score">📅 {candidate.total_experience}y exp</span>
-                            </div>
+        # In the display_candidate_cards function, update the education display:
+
+def display_candidate_cards(candidates_list):
+    if not candidates_list:
+        st.info("No candidates in this category")
+        return
+    
+    for candidate in candidates_list:
+        if not candidate.success:
+            continue
+        
+        score_class = get_score_class(candidate.overall_score)
+        rank_class = get_rank_class(candidate.rank)
+        
+        # Get deduplicated highest education for display
+        highest_edu = candidate.highest_education
+        if len(highest_edu) > 80:
+            display_edu = highest_edu[:80] + "..."
+        else:
+            display_edu = highest_edu
+        
+        with st.container():
+            st.markdown(f"""
+                <div class="candidate-card">
+                    <div style="display: flex; align-items: center; margin-bottom: 12px;">
+                        <span class="candidate-rank {rank_class}">#{candidate.rank}</span>
+                        <div style="flex: 1;">
+                            <strong style="font-size: 1.1rem; color: #f1f5f9;">{candidate.candidate_name}</strong>
+                            <p style="margin: 2px 0; color: #94a3b8; font-size: 0.85rem;">
+                                {candidate.current_role} {f'at {candidate.current_company}' if candidate.current_company else ''}
+                            </p>
                         </div>
-                    """, unsafe_allow_html=True)
+                        <span class="score-badge {score_class}">{candidate.overall_score}%</span>
+                    </div>
+                    <div class="score-breakdown">
+                        <span class="mini-score">🎯 Skills: {candidate.skills_score}%</span>
+                        <span class="mini-score">💼 Exp: {candidate.experience_score}%</span>
+                        <span class="mini-score">🎓 Edu: {candidate.education_score}%</span>
+                        <span class="mini-score">📍 Location: {candidate.location_score}%</span>
+                        <span class="mini-score">📅 {candidate.total_experience}y exp</span>
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
+            
+            with st.expander(f"📋 Details - {candidate.candidate_name}"):
+                detail_col1, detail_col2 = st.columns(2)
+                
+                with detail_col1:
+                    st.markdown("**📞 Contact:**")
+                    if candidate.email:
+                        st.write(f"📧 {candidate.email}")
+                    if candidate.phone:
+                        st.write(f"📱 {candidate.phone}")
+                    if candidate.location:
+                        st.write(f"📍 {candidate.location}")
                     
-                    with st.expander(f"📋 Details - {candidate.candidate_name}"):
-                        detail_col1, detail_col2 = st.columns(2)
-                        
-                        with detail_col1:
-                            st.markdown("**📞 Contact:**")
-                            if candidate.email:
-                                st.write(f"📧 {candidate.email}")
-                            if candidate.phone:
-                                st.write(f"📱 {candidate.phone}")
-                            if candidate.location:
-                                st.write(f"📍 {candidate.location}")
-                            
-                            st.markdown("**🎓 Education:**")
-                            st.write(candidate.highest_education or "Not specified")
-                        
-                        with detail_col2:
-                            st.markdown("**✅ Matched Skills:**")
-                            if candidate.matched_skills:
-                                st.write(", ".join(candidate.matched_skills[:10]))
-                            else:
-                                st.write("No specific matches")
-                            
-                            st.markdown("**❌ Missing Skills:**")
-                            if candidate.missing_skills:
-                                st.write(", ".join(candidate.missing_skills[:8]))
-                            else:
-                                st.write("None identified")
-                        
-                        st.markdown("**💡 Recommendation:**")
-                        st.info(candidate.recommendation)
-                        
-                        if candidate.strengths:
-                            st.markdown("**✨ Strengths:**")
-                            for s in candidate.strengths:
-                                st.write(f"• {s}")
-                        
-                        if candidate.gaps:
-                            st.markdown("**⚠️ Gaps:**")
-                            for g in candidate.gaps:
-                                st.write(f"• {g}")
-                        
-                        st.caption(f"📁 File: {candidate.file_name} | ⏱️ Processed in {candidate.processing_time}s")
+                    # Show only highest education (deduplicated)
+                    st.markdown("**🎓 Highest Education:**")
+                    st.write(highest_edu or "Not specified")
+                
+                with detail_col2:
+                    # Deduplicate matched skills for display
+                    unique_matched = list(set(candidate.matched_skills))
+                    st.markdown("**✅ Matched Skills:**")
+                    if unique_matched:
+                        st.write(", ".join(unique_matched[:12]))
+                        if len(unique_matched) > 12:
+                            st.caption(f"... and {len(unique_matched) - 12} more")
+                    else:
+                        st.write("No specific matches")
+                    
+                    # Deduplicate missing skills
+                    unique_missing = list(set(candidate.missing_skills))
+                    st.markdown("**❌ Missing Skills:**")
+                    if unique_missing:
+                        st.write(", ".join(unique_missing[:8]))
+                    else:
+                        st.write("None identified")
+                
+                st.markdown("**💡 Recommendation:**")
+                st.info(candidate.recommendation)
+                
+                # Deduplicate strengths
+                if candidate.strengths:
+                    unique_strengths = list(set(candidate.strengths))
+                    st.markdown("**✨ Strengths:**")
+                    for s in unique_strengths:
+                        st.write(f"• {s}")
+                
+                # Deduplicate gaps
+                if candidate.gaps:
+                    unique_gaps = list(set(candidate.gaps))
+                    st.markdown("**⚠️ Gaps:**")
+                    for g in unique_gaps:
+                        st.write(f"• {g}")
+                
+                st.caption(f"📁 File: {candidate.file_name} | ⏱️ Processed in {candidate.processing_time}s")
         
         with tab_all:
             display_candidate_cards([c for c in result.candidates if c.success])
