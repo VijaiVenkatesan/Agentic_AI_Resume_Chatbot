@@ -1,7 +1,7 @@
 """
 Bulk Resume Processor - Enterprise HR Feature
 Handles multiple resume uploads and batch JD matching
-Version: 1.0
+Version: 2.0 - Full values, no truncation
 """
 
 import time
@@ -38,7 +38,7 @@ class CandidateResult:
     location_score: float = 0.0
     keyword_score: float = 0.0
     
-    # Details
+    # Details - NO LIMITS
     matched_skills: List[str] = field(default_factory=list)
     missing_skills: List[str] = field(default_factory=list)
     strengths: List[str] = field(default_factory=list)
@@ -181,7 +181,7 @@ def extract_jd_requirements(jd_text: str) -> Dict:
     
     # Get top keywords by frequency
     sorted_words = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)
-    requirements["keywords"] = [w[0] for w in sorted_words[:40]]
+    requirements["keywords"] = [w[0] for w in sorted_words[:50]]
     
     return requirements
 
@@ -300,9 +300,9 @@ def calculate_match_scores(
         scores["missing_skills"] = list(set(missing))
         
         match_ratio = len(matched) / len(required_skills) if required_skills else 0
-        scores["skills_score"] = round(min(100, match_ratio * 110), 1)  # Slight boost
+        scores["skills_score"] = round(min(100, match_ratio * 110), 1)
     else:
-        scores["skills_score"] = 70  # Default if no specific skills in JD
+        scores["skills_score"] = 70
     
     # ═══════════════════════════════════════
     # 2. EXPERIENCE MATCH (25% weight)
@@ -321,18 +321,15 @@ def calculate_match_scores(
             if candidate_exp <= max_exp:
                 scores["experience_score"] = 100
             else:
-                # Over-qualified - slight penalty
                 over_by = candidate_exp - max_exp
                 scores["experience_score"] = max(65, 100 - (over_by * 3))
         else:
-            # Under-qualified
             if candidate_exp > 0:
                 ratio = candidate_exp / min_exp
                 scores["experience_score"] = round(min(95, ratio * 100), 1)
             else:
                 scores["experience_score"] = 20
     else:
-        # No specific requirement
         scores["experience_score"] = 80 if candidate_exp > 0 else 50
     
     # ═══════════════════════════════════════
@@ -347,7 +344,6 @@ def calculate_match_scores(
     elif isinstance(education, dict):
         edu_text = json.dumps(education).lower()
     
-    # Degree level hierarchy
     degree_levels = {
         "phd": 6, "ph.d": 6, "doctorate": 6, "doctoral": 6,
         "master": 5, "mba": 5, "m.tech": 5, "mtech": 5, "m.e": 5, "m.sc": 5, "mca": 5, "m.com": 5,
@@ -391,22 +387,20 @@ def calculate_match_scores(
     preferred_locations = [loc.lower() for loc in jd_requirements.get("preferred_locations", [])]
     
     if preferred_locations:
-        # Remote-friendly job
         remote_keywords = ["remote", "work from home", "wfh", "telecommute", "hybrid"]
         if any(kw in preferred_locations for kw in remote_keywords):
             scores["location_score"] = 100
         elif candidate_location:
-            # Check if candidate location matches any preferred location
             location_match = any(loc in candidate_location or candidate_location in loc 
                                for loc in preferred_locations if loc not in remote_keywords)
             if location_match:
                 scores["location_score"] = 100
             else:
-                scores["location_score"] = 55  # Has location but doesn't match
+                scores["location_score"] = 55
         else:
-            scores["location_score"] = 50  # No location info
+            scores["location_score"] = 50
     else:
-        scores["location_score"] = 85  # No location requirement specified
+        scores["location_score"] = 85
     
     # ═══════════════════════════════════════
     # 5. KEYWORD MATCH (15% weight)
@@ -432,14 +426,12 @@ def calculate_match_scores(
         1
     )
     
-    # Cap at 100
     scores["overall_score"] = min(100, scores["overall_score"])
     
     # ═══════════════════════════════════════
     # IDENTIFY STRENGTHS & GAPS
     # ═══════════════════════════════════════
     
-    # Strengths
     if scores["skills_score"] >= 75:
         scores["strengths"].append(f"Strong skill match ({scores['skills_score']:.0f}%)")
     elif scores["skills_score"] >= 60:
@@ -459,7 +451,6 @@ def calculate_match_scores(
     if scores["keyword_score"] >= 70:
         scores["strengths"].append("Good keyword/context match with JD")
     
-    # Gaps
     if scores["skills_score"] < 50:
         missing_count = len(scores["missing_skills"])
         scores["gaps"].append(f"Significant skill gaps ({missing_count} missing skills)")
@@ -497,7 +488,7 @@ def calculate_match_scores(
 
 
 def get_highest_education(parsed_resume: Dict) -> str:
-    """Extract highest education from parsed resume"""
+    """Extract highest education from parsed resume - FULL VALUE, NO TRUNCATION"""
     education = parsed_resume.get("education", [])
     
     if not education:
@@ -520,21 +511,218 @@ def get_highest_education(parsed_resume: Dict) -> str:
         for edu in education:
             if isinstance(edu, dict):
                 degree = edu.get("degree", "").lower()
-                field = edu.get("field", edu.get("major", ""))
-                institution = edu.get("institution", edu.get("university", edu.get("college", "")))
                 
                 for key, priority in degree_priority.items():
                     if key in degree:
                         if priority > highest_priority:
                             highest_priority = priority
-                            highest = edu.get("degree", "")
-                            if field:
-                                highest += f" in {field}"
-                            if institution:
-                                highest += f" ({institution})"
+                            
+                            # Build FULL education string - NO TRUNCATION
+                            parts = []
+                            
+                            if edu.get("degree"):
+                                parts.append(edu.get("degree"))
+                            
+                            if edu.get("field") or edu.get("major") or edu.get("branch"):
+                                field = edu.get("field") or edu.get("major") or edu.get("branch")
+                                parts.append(f"in {field}")
+                            
+                            if edu.get("institution") or edu.get("university") or edu.get("college"):
+                                inst = edu.get("institution") or edu.get("university") or edu.get("college")
+                                parts.append(f"from {inst}")
+                            
+                            if edu.get("location"):
+                                parts.append(f"({edu.get('location')})")
+                            
+                            if edu.get("year") or edu.get("end_year") or edu.get("graduation_year"):
+                                year = edu.get("year") or edu.get("end_year") or edu.get("graduation_year")
+                                parts.append(f"[{year}]")
+                            
+                            if edu.get("gpa") or edu.get("cgpa") or edu.get("grade") or edu.get("percentage"):
+                                gpa = edu.get("gpa") or edu.get("cgpa") or edu.get("grade") or edu.get("percentage")
+                                parts.append(f"- GPA/Grade: {gpa}")
+                            
+                            highest = " ".join(parts)
                         break
     
-    return highest[:100] if highest else "Not specified"
+    return highest if highest else "Not specified"
+
+
+def get_all_education_details(parsed_resume: Dict) -> str:
+    """Get ALL education entries as a formatted string - NO TRUNCATION"""
+    education = parsed_resume.get("education", [])
+    
+    if not education:
+        return "Not specified"
+    
+    edu_entries = []
+    
+    if isinstance(education, list):
+        for edu in education:
+            if isinstance(edu, dict):
+                parts = []
+                
+                if edu.get("degree"):
+                    parts.append(edu.get("degree"))
+                
+                if edu.get("field") or edu.get("major") or edu.get("branch"):
+                    field = edu.get("field") or edu.get("major") or edu.get("branch")
+                    parts.append(f"in {field}")
+                
+                if edu.get("institution") or edu.get("university") or edu.get("college"):
+                    inst = edu.get("institution") or edu.get("university") or edu.get("college")
+                    parts.append(f"from {inst}")
+                
+                if edu.get("location"):
+                    parts.append(f"({edu.get('location')})")
+                
+                if edu.get("year") or edu.get("end_year") or edu.get("graduation_year") or edu.get("start_year"):
+                    start = edu.get("start_year", "")
+                    end = edu.get("year") or edu.get("end_year") or edu.get("graduation_year", "")
+                    if start and end:
+                        parts.append(f"[{start} - {end}]")
+                    elif end:
+                        parts.append(f"[{end}]")
+                
+                if edu.get("gpa") or edu.get("cgpa") or edu.get("grade") or edu.get("percentage"):
+                    gpa = edu.get("gpa") or edu.get("cgpa") or edu.get("grade") or edu.get("percentage")
+                    parts.append(f"- GPA/Grade: {gpa}")
+                
+                if edu.get("achievements"):
+                    achievements = edu.get("achievements")
+                    if isinstance(achievements, list) and achievements:
+                        parts.append(f"- Achievements: {', '.join(achievements)}")
+                
+                if parts:
+                    edu_entries.append(" ".join(parts))
+    
+    return " || ".join(edu_entries) if edu_entries else "Not specified"
+
+
+def get_all_work_history(parsed_resume: Dict) -> str:
+    """Get ALL work history entries as a formatted string - NO TRUNCATION"""
+    work_history = parsed_resume.get("work_history", parsed_resume.get("experience", []))
+    
+    if not work_history:
+        return "Not specified"
+    
+    work_entries = []
+    
+    if isinstance(work_history, list):
+        for job in work_history:
+            if isinstance(job, dict):
+                parts = []
+                
+                title = job.get("title") or job.get("role") or job.get("position", "")
+                if title:
+                    parts.append(title)
+                
+                company = job.get("company") or job.get("organization", "")
+                if company:
+                    parts.append(f"at {company}")
+                
+                location = job.get("location", "")
+                if location:
+                    parts.append(f"({location})")
+                
+                start_date = job.get("start_date") or job.get("from", "")
+                end_date = job.get("end_date") or job.get("to", "")
+                duration = job.get("duration", "")
+                
+                if start_date and end_date:
+                    parts.append(f"[{start_date} - {end_date}]")
+                elif duration:
+                    parts.append(f"[{duration}]")
+                
+                duration_years = job.get("duration_years") or job.get("years", "")
+                if duration_years:
+                    parts.append(f"({duration_years} years)")
+                
+                job_type = job.get("type", "")
+                if job_type:
+                    parts.append(f"- {job_type}")
+                
+                if parts:
+                    work_entries.append(" ".join(parts))
+    
+    return " || ".join(work_entries) if work_entries else "Not specified"
+
+
+def get_all_skills(parsed_resume: Dict) -> str:
+    """Get ALL skills as a formatted string - NO TRUNCATION"""
+    all_skills = []
+    
+    skills_data = parsed_resume.get("skills", {})
+    
+    if isinstance(skills_data, dict):
+        for category, skills_list in skills_data.items():
+            if isinstance(skills_list, list):
+                all_skills.extend(skills_list)
+    elif isinstance(skills_data, list):
+        all_skills.extend(skills_data)
+    
+    # Add specializations
+    specs = parsed_resume.get("specializations", [])
+    if isinstance(specs, list):
+        all_skills.extend(specs)
+    
+    # Add technologies from work history
+    work_history = parsed_resume.get("work_history", parsed_resume.get("experience", []))
+    if isinstance(work_history, list):
+        for job in work_history:
+            if isinstance(job, dict):
+                techs = job.get("technologies_used", job.get("technologies", []))
+                if isinstance(techs, list):
+                    all_skills.extend(techs)
+    
+    # Deduplicate while preserving order
+    seen = set()
+    unique_skills = []
+    for skill in all_skills:
+        if skill and skill.lower() not in seen:
+            seen.add(skill.lower())
+            unique_skills.append(skill)
+    
+    return ", ".join(unique_skills) if unique_skills else "Not specified"
+
+
+def get_all_certifications(parsed_resume: Dict) -> str:
+    """Get ALL certifications as a formatted string - NO TRUNCATION"""
+    certifications = parsed_resume.get("certifications", [])
+    
+    if not certifications:
+        return "Not specified"
+    
+    cert_entries = []
+    
+    if isinstance(certifications, list):
+        for cert in certifications:
+            if isinstance(cert, dict):
+                parts = []
+                
+                name = cert.get("name", "")
+                if name:
+                    parts.append(name)
+                
+                provider = cert.get("provider") or cert.get("issuer") or cert.get("organization", "")
+                if provider:
+                    parts.append(f"by {provider}")
+                
+                date = cert.get("date") or cert.get("issue_date") or cert.get("year", "")
+                if date:
+                    parts.append(f"({date})")
+                
+                credential_id = cert.get("credential_id") or cert.get("id", "")
+                if credential_id:
+                    parts.append(f"[ID: {credential_id}]")
+                
+                if parts:
+                    cert_entries.append(" ".join(parts))
+            
+            elif isinstance(cert, str) and cert:
+                cert_entries.append(cert)
+    
+    return " || ".join(cert_entries) if cert_entries else "Not specified"
 
 
 def process_single_resume_for_bulk(
@@ -544,7 +732,7 @@ def process_single_resume_for_bulk(
     groq_api_key: str,
     model_id: str
 ) -> CandidateResult:
-    """Process a single resume in bulk mode"""
+    """Process a single resume in bulk mode - NO TRUNCATION"""
     start_time = time.time()
     
     file_name = file_data.get("file_name", "Unknown")
@@ -575,10 +763,9 @@ def process_single_resume_for_bulk(
         # Calculate match scores
         scores = calculate_match_scores(parsed, resume_text, jd_text, jd_requirements)
         
-        # Get candidate details
+        # Get candidate details - FULL VALUES
         candidate_name = parsed.get("name", "Unknown")
         if not candidate_name or candidate_name in ["", "N/A", "Unknown", "Candidate"]:
-            # Try to extract from filename
             candidate_name = file_name.rsplit(".", 1)[0].replace("_", " ").replace("-", " ").title()
         
         total_exp = parsed.get("total_experience_years", 0)
@@ -587,7 +774,7 @@ def process_single_resume_for_bulk(
         except (ValueError, TypeError):
             total_exp = 0
         
-        # Build result
+        # Build result - NO TRUNCATION on any field
         result = CandidateResult(
             file_name=file_name,
             candidate_name=candidate_name,
@@ -604,10 +791,10 @@ def process_single_resume_for_bulk(
             education_score=scores["education_score"],
             location_score=scores["location_score"],
             keyword_score=scores["keyword_score"],
-            matched_skills=scores["matched_skills"][:15],
-            missing_skills=scores["missing_skills"][:10],
-            strengths=scores["strengths"],
-            gaps=scores["gaps"],
+            matched_skills=scores["matched_skills"],  # ALL - no limit
+            missing_skills=scores["missing_skills"],  # ALL - no limit
+            strengths=scores["strengths"],  # ALL
+            gaps=scores["gaps"],  # ALL
             recommendation=scores["recommendation"],
             processing_time=round(time.time() - start_time, 2),
             success=True,
@@ -629,7 +816,7 @@ def process_single_resume_for_bulk(
             total_experience=0,
             highest_education="",
             success=False,
-            error=str(e)[:200],
+            error=str(e),
             processing_time=round(time.time() - start_time, 2)
         )
 
@@ -688,7 +875,7 @@ def process_bulk_resumes(
                     total_experience=0,
                     highest_education="",
                     success=False,
-                    error=file_result.get("error", "Failed to process file")[:200]
+                    error=file_result.get("error", "Failed to process file")
                 ))
                 failed += 1
                 continue
@@ -724,7 +911,7 @@ def process_bulk_resumes(
                 total_experience=0,
                 highest_education="",
                 success=False,
-                error=str(e)[:200]
+                error=str(e)
             ))
             failed += 1
         
@@ -755,7 +942,7 @@ def process_bulk_resumes(
 
 
 def results_to_dataframe(result: BulkProcessingResult) -> pd.DataFrame:
-    """Convert bulk processing results to a pandas DataFrame"""
+    """Convert bulk processing results to a pandas DataFrame - FULL VALUES, NO TRUNCATION"""
     data = []
     
     for candidate in result.candidates:
@@ -767,18 +954,22 @@ def results_to_dataframe(result: BulkProcessingResult) -> pd.DataFrame:
             "Experience Match": f"{candidate.experience_score}%" if candidate.success else "-",
             "Education Match": f"{candidate.education_score}%" if candidate.success else "-",
             "Location Match": f"{candidate.location_score}%" if candidate.success else "-",
+            "Keyword Match": f"{candidate.keyword_score}%" if candidate.success else "-",
             "Experience (Years)": candidate.total_experience if candidate.success else "-",
-            "Current Role": candidate.current_role[:40] if candidate.current_role else "",
-            "Company": candidate.current_company[:30] if candidate.current_company else "",
+            "Current Role": candidate.current_role,  # FULL VALUE
+            "Company": candidate.current_company,  # FULL VALUE
             "Email": candidate.email,
             "Phone": candidate.phone,
-            "Location": candidate.location[:30] if candidate.location else "",
-            "Education": candidate.highest_education[:50] if candidate.highest_education else "",
-            "Matched Skills": ", ".join(candidate.matched_skills[:8]),
-            "Missing Skills": ", ".join(candidate.missing_skills[:5]),
+            "Location": candidate.location,  # FULL VALUE
+            "Education": candidate.highest_education,  # FULL VALUE
+            "Matched Skills": ", ".join(candidate.matched_skills) if candidate.matched_skills else "",  # ALL SKILLS
+            "Missing Skills": ", ".join(candidate.missing_skills) if candidate.missing_skills else "",  # ALL SKILLS
+            "Strengths": " | ".join(candidate.strengths) if candidate.strengths else "",  # FULL VALUE
+            "Gaps": " | ".join(candidate.gaps) if candidate.gaps else "",  # FULL VALUE
             "Recommendation": candidate.recommendation if candidate.success else f"Error: {candidate.error}",
             "File Name": candidate.file_name,
-            "Status": "✅ Success" if candidate.success else "❌ Failed",
+            "Processing Time (s)": candidate.processing_time if candidate.success else "-",
+            "Status": "Success" if candidate.success else "Failed",
         }
         data.append(row)
     
@@ -786,7 +977,7 @@ def results_to_dataframe(result: BulkProcessingResult) -> pd.DataFrame:
 
 
 def export_results_to_excel(result: BulkProcessingResult) -> bytes:
-    """Export bulk processing results to Excel file"""
+    """Export bulk processing results to Excel file - FULL VALUES, NO TRUNCATION"""
     import io
     
     df = results_to_dataframe(result)
@@ -795,10 +986,11 @@ def export_results_to_excel(result: BulkProcessingResult) -> bytes:
     output = io.BytesIO()
     
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        # Main results sheet
+        # ══════════════════════════════════════════════════════
+        # SHEET 1: CANDIDATE RANKINGS (Main comparison table)
+        # ══════════════════════════════════════════════════════
         df.to_excel(writer, sheet_name='Candidate Rankings', index=False)
         
-        # Get workbook and worksheet
         workbook = writer.book
         worksheet = writer.sheets['Candidate Rankings']
         
@@ -813,85 +1005,222 @@ def export_results_to_excel(result: BulkProcessingResult) -> bytes:
             'text_wrap': True
         })
         
+        wrap_format = workbook.add_format({
+            'text_wrap': True,
+            'valign': 'top'
+        })
+        
         # Apply header format
         for col_num, value in enumerate(df.columns.values):
             worksheet.write(0, col_num, value, header_format)
         
-        # Adjust column widths
-        column_widths = {
-            'Rank': 8,
-            'Candidate Name': 25,
-            'Overall Score': 14,
-            'Skills Match': 14,
-            'Experience Match': 16,
-            'Education Match': 16,
-            'Location Match': 14,
-            'Experience (Years)': 16,
-            'Current Role': 30,
-            'Company': 25,
-            'Email': 30,
-            'Phone': 18,
-            'Location': 25,
-            'Education': 40,
-            'Matched Skills': 50,
-            'Missing Skills': 35,
-            'Recommendation': 35,
-            'File Name': 30,
-            'Status': 12,
-        }
-        
+        # Auto-calculate column widths based on content
         for i, col in enumerate(df.columns):
-            width = column_widths.get(col, 15)
-            worksheet.set_column(i, i, width)
+            max_content_length = df[col].astype(str).apply(len).max()
+            header_length = len(col)
+            width = max(header_length, min(max_content_length, 100)) + 2
+            worksheet.set_column(i, i, width, wrap_format)
         
-        # Freeze top row
-        worksheet.freeze_panes(1, 0)
+        # Freeze top row and first column
+        worksheet.freeze_panes(1, 1)
         
-        # ── JD Requirements Sheet ──
-        jd_data = []
-        jd_data.append({"Category": "Required Skills", "Details": ", ".join(result.jd_summary.get("required_skills", []))})
-        jd_data.append({"Category": "Min Experience", "Details": f"{result.jd_summary.get('min_experience_years', 0)} years"})
-        jd_data.append({"Category": "Required Education", "Details": ", ".join(result.jd_summary.get("required_education", []))})
-        jd_data.append({"Category": "Preferred Locations", "Details": ", ".join(result.jd_summary.get("preferred_locations", []))})
-        jd_data.append({"Category": "Key Keywords", "Details": ", ".join(result.jd_summary.get("keywords", [])[:20])})
+        # ══════════════════════════════════════════════════════
+        # SHEET 2: DETAILED CANDIDATE INFO (Extended data)
+        # ══════════════════════════════════════════════════════
+        detailed_data = []
+        for candidate in result.candidates:
+            if candidate.success:
+                detailed_data.append({
+                    "Rank": candidate.rank,
+                    "Candidate Name": candidate.candidate_name,
+                    "Overall Score (%)": candidate.overall_score,
+                    "Skills Score (%)": candidate.skills_score,
+                    "Experience Score (%)": candidate.experience_score,
+                    "Education Score (%)": candidate.education_score,
+                    "Location Score (%)": candidate.location_score,
+                    "Keyword Score (%)": candidate.keyword_score,
+                    "Email": candidate.email,
+                    "Phone": candidate.phone,
+                    "Address/Location": candidate.parsed_resume.get("address", "") or candidate.location,
+                    "LinkedIn": candidate.parsed_resume.get("linkedin", ""),
+                    "GitHub": candidate.parsed_resume.get("github", ""),
+                    "Portfolio": candidate.parsed_resume.get("portfolio", ""),
+                    "Professional Summary": candidate.parsed_resume.get("professional_summary", candidate.parsed_resume.get("summary", "")),
+                    "Total Experience (Years)": candidate.total_experience,
+                    "Current Role": candidate.current_role,
+                    "Current Company": candidate.current_company,
+                    "All Skills": get_all_skills(candidate.parsed_resume),
+                    "Work History (Full)": get_all_work_history(candidate.parsed_resume),
+                    "Education (Full)": get_all_education_details(candidate.parsed_resume),
+                    "Certifications (Full)": get_all_certifications(candidate.parsed_resume),
+                    "Specializations": ", ".join(candidate.parsed_resume.get("specializations", [])),
+                    "Awards": ", ".join([
+                        a.get("name", str(a)) if isinstance(a, dict) else str(a) 
+                        for a in candidate.parsed_resume.get("awards", [])
+                    ]),
+                    "Languages": ", ".join(candidate.parsed_resume.get("languages", [])),
+                    "Matched Skills": ", ".join(candidate.matched_skills),
+                    "Missing Skills": ", ".join(candidate.missing_skills),
+                    "Strengths": " | ".join(candidate.strengths),
+                    "Gaps": " | ".join(candidate.gaps),
+                    "Recommendation": candidate.recommendation,
+                    "File Name": candidate.file_name,
+                    "Processing Time (s)": candidate.processing_time,
+                })
+        
+        if detailed_data:
+            detailed_df = pd.DataFrame(detailed_data)
+            detailed_df.to_excel(writer, sheet_name='Detailed Candidate Info', index=False)
+            
+            detailed_worksheet = writer.sheets['Detailed Candidate Info']
+            
+            for col_num, value in enumerate(detailed_df.columns.values):
+                detailed_worksheet.write(0, col_num, value, header_format)
+            
+            # Set column widths for detailed sheet
+            for i, col in enumerate(detailed_df.columns):
+                max_content_length = detailed_df[col].astype(str).apply(len).max()
+                header_length = len(col)
+                width = max(header_length, min(max_content_length, 120)) + 2
+                detailed_worksheet.set_column(i, i, width, wrap_format)
+            
+            detailed_worksheet.freeze_panes(1, 1)
+        
+        # ══════════════════════════════════════════════════════
+        # SHEET 3: JD REQUIREMENTS
+        # ══════════════════════════════════════════════════════
+        jd_data = [
+            {"Category": "Required Skills", "Details": ", ".join(result.jd_summary.get("required_skills", [])) or "Not specified"},
+            {"Category": "Min Experience (Years)", "Details": str(result.jd_summary.get("min_experience_years", 0))},
+            {"Category": "Max Experience (Years)", "Details": str(result.jd_summary.get("max_experience_years", "Not specified")) if result.jd_summary.get("max_experience_years", 99) < 99 else "Not specified"},
+            {"Category": "Required Education", "Details": ", ".join(result.jd_summary.get("required_education", [])) or "Not specified"},
+            {"Category": "Preferred Locations", "Details": ", ".join(result.jd_summary.get("preferred_locations", [])) or "Not specified"},
+            {"Category": "Key Keywords", "Details": ", ".join(result.jd_summary.get("keywords", [])) or "Not specified"},
+        ]
         
         jd_df = pd.DataFrame(jd_data)
         jd_df.to_excel(writer, sheet_name='JD Requirements', index=False)
         
         jd_worksheet = writer.sheets['JD Requirements']
-        jd_worksheet.set_column(0, 0, 20)
-        jd_worksheet.set_column(1, 1, 80)
+        jd_worksheet.set_column(0, 0, 25)
+        jd_worksheet.set_column(1, 1, 150, wrap_format)
         
-        # ── Summary Sheet ──
+        for col_num, value in enumerate(jd_df.columns.values):
+            jd_worksheet.write(0, col_num, value, header_format)
+        
+        # ══════════════════════════════════════════════════════
+        # SHEET 4: SUMMARY
+        # ══════════════════════════════════════════════════════
         avg_score = sum(c.overall_score for c in result.candidates if c.success) / max(result.successful, 1)
-        top_candidate = result.candidates[0] if result.candidates else None
+        top_candidate = result.candidates[0] if result.candidates and result.candidates[0].success else None
         
         summary_data = [
+            {"Metric": "Report Generated", "Value": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")},
+            {"Metric": "", "Value": ""},
+            {"Metric": "=== PROCESSING STATS ===", "Value": ""},
             {"Metric": "Total Resumes Processed", "Value": result.total_resumes},
             {"Metric": "Successfully Processed", "Value": result.successful},
             {"Metric": "Failed", "Value": result.failed},
-            {"Metric": "Processing Time", "Value": f"{result.processing_time} seconds"},
+            {"Metric": "Processing Time (seconds)", "Value": result.processing_time},
+            {"Metric": "", "Value": ""},
+            {"Metric": "=== SCORE SUMMARY ===", "Value": ""},
             {"Metric": "Average Match Score", "Value": f"{avg_score:.1f}%"},
-            {"Metric": "Top Candidate", "Value": top_candidate.candidate_name if top_candidate else "N/A"},
-            {"Metric": "Top Score", "Value": f"{top_candidate.overall_score}%" if top_candidate and top_candidate.success else "N/A"},
-            {"Metric": "Candidates ≥80%", "Value": sum(1 for c in result.candidates if c.success and c.overall_score >= 80)},
-            {"Metric": "Candidates 65-79%", "Value": sum(1 for c in result.candidates if c.success and 65 <= c.overall_score < 80)},
-            {"Metric": "Candidates 50-64%", "Value": sum(1 for c in result.candidates if c.success and 50 <= c.overall_score < 65)},
-            {"Metric": "Candidates <50%", "Value": sum(1 for c in result.candidates if c.success and c.overall_score < 50)},
+            {"Metric": "Highest Score", "Value": f"{top_candidate.overall_score}%" if top_candidate else "N/A"},
+            {"Metric": "Lowest Score (successful)", "Value": f"{min(c.overall_score for c in result.candidates if c.success):.1f}%" if result.successful > 0 else "N/A"},
+            {"Metric": "", "Value": ""},
+            {"Metric": "=== TOP CANDIDATE ===", "Value": ""},
+            {"Metric": "Name", "Value": top_candidate.candidate_name if top_candidate else "N/A"},
+            {"Metric": "Score", "Value": f"{top_candidate.overall_score}%" if top_candidate else "N/A"},
+            {"Metric": "Email", "Value": top_candidate.email if top_candidate else "N/A"},
+            {"Metric": "Phone", "Value": top_candidate.phone if top_candidate else "N/A"},
+            {"Metric": "Current Role", "Value": top_candidate.current_role if top_candidate else "N/A"},
+            {"Metric": "Experience", "Value": f"{top_candidate.total_experience} years" if top_candidate else "N/A"},
+            {"Metric": "", "Value": ""},
+            {"Metric": "=== SCORE DISTRIBUTION ===", "Value": ""},
+            {"Metric": "Excellent (≥80%)", "Value": sum(1 for c in result.candidates if c.success and c.overall_score >= 80)},
+            {"Metric": "Good (65-79%)", "Value": sum(1 for c in result.candidates if c.success and 65 <= c.overall_score < 80)},
+            {"Metric": "Moderate (50-64%)", "Value": sum(1 for c in result.candidates if c.success and 50 <= c.overall_score < 65)},
+            {"Metric": "Below Average (<50%)", "Value": sum(1 for c in result.candidates if c.success and c.overall_score < 50)},
         ]
         
         summary_df = pd.DataFrame(summary_data)
         summary_df.to_excel(writer, sheet_name='Summary', index=False)
         
         summary_worksheet = writer.sheets['Summary']
-        summary_worksheet.set_column(0, 0, 30)
-        summary_worksheet.set_column(1, 1, 40)
+        summary_worksheet.set_column(0, 0, 35)
+        summary_worksheet.set_column(1, 1, 50)
+        
+        for col_num, value in enumerate(summary_df.columns.values):
+            summary_worksheet.write(0, col_num, value, header_format)
+        
+        # ══════════════════════════════════════════════════════
+        # SHEET 5: FAILED FILES (if any)
+        # ══════════════════════════════════════════════════════
+        failed_candidates = [c for c in result.candidates if not c.success]
+        if failed_candidates:
+            failed_data = [
+                {
+                    "File Name": c.file_name,
+                    "Error": c.error or "Unknown error"
+                }
+                for c in failed_candidates
+            ]
+            
+            failed_df = pd.DataFrame(failed_data)
+            failed_df.to_excel(writer, sheet_name='Failed Files', index=False)
+            
+            failed_worksheet = writer.sheets['Failed Files']
+            failed_worksheet.set_column(0, 0, 40)
+            failed_worksheet.set_column(1, 1, 100, wrap_format)
+            
+            for col_num, value in enumerate(failed_df.columns.values):
+                failed_worksheet.write(0, col_num, value, header_format)
     
     output.seek(0)
     return output.getvalue()
 
 
 def export_results_to_csv(result: BulkProcessingResult) -> str:
-    """Export bulk processing results to CSV string"""
+    """Export bulk processing results to CSV string - FULL VALUES"""
     df = results_to_dataframe(result)
+    return df.to_csv(index=False)
+
+
+def export_detailed_results_to_csv(result: BulkProcessingResult) -> str:
+    """Export detailed results to CSV with all fields - FULL VALUES"""
+    detailed_data = []
+    
+    for candidate in result.candidates:
+        if candidate.success:
+            detailed_data.append({
+                "Rank": candidate.rank,
+                "Candidate Name": candidate.candidate_name,
+                "Overall Score (%)": candidate.overall_score,
+                "Skills Score (%)": candidate.skills_score,
+                "Experience Score (%)": candidate.experience_score,
+                "Education Score (%)": candidate.education_score,
+                "Location Score (%)": candidate.location_score,
+                "Keyword Score (%)": candidate.keyword_score,
+                "Email": candidate.email,
+                "Phone": candidate.phone,
+                "Location": candidate.location,
+                "LinkedIn": candidate.parsed_resume.get("linkedin", ""),
+                "GitHub": candidate.parsed_resume.get("github", ""),
+                "Professional Summary": candidate.parsed_resume.get("professional_summary", ""),
+                "Total Experience (Years)": candidate.total_experience,
+                "Current Role": candidate.current_role,
+                "Current Company": candidate.current_company,
+                "All Skills": get_all_skills(candidate.parsed_resume),
+                "Work History": get_all_work_history(candidate.parsed_resume),
+                "Education (Full)": get_all_education_details(candidate.parsed_resume),
+                "Certifications": get_all_certifications(candidate.parsed_resume),
+                "Matched Skills": ", ".join(candidate.matched_skills),
+                "Missing Skills": ", ".join(candidate.missing_skills),
+                "Strengths": " | ".join(candidate.strengths),
+                "Gaps": " | ".join(candidate.gaps),
+                "Recommendation": candidate.recommendation,
+                "File Name": candidate.file_name,
+            })
+    
+    df = pd.DataFrame(detailed_data)
     return df.to_csv(index=False)
