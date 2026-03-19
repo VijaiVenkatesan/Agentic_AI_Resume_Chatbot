@@ -119,16 +119,16 @@ Extract ALL information into this exact JSON structure (no markdown, no code blo
     ],
     "education": [
         {{
-            "degree": "Full degree name (e.g., Bachelor of Technology, Master of Science)",
-            "field": "field of study / major / branch (e.g., Computer Science, Electronics)",
-            "institution": "university or college name",
+            "degree": "EXACT degree as written in resume (do NOT use examples - extract only what is written)",
+            "field": "EXACT field/major/branch as written in resume",
+            "institution": "EXACT university/college name as written in resume",
             "location": "location",
             "start_year": "year",
             "end_year": "year or expected year",
             "gpa": "GPA, CGPA, or percentage if mentioned",
             "achievements": ["honors", "relevant coursework", "activities"]
         }}
-    ],
+    ],,
     "certifications": [
         {{
             "name": "certification name",
@@ -165,15 +165,14 @@ CRITICAL RULES:
 3. **EMAIL**: Find ANYTHING with @ symbol.
 4. **ADDRESS**: Street numbers, city names, pin/zip codes.
 5. **EDUCATION** — VERY IMPORTANT:
-   - Extract ONLY genuine degrees from the EDUCATION section of the resume.
-   - Each person typically has 1-3 degrees (e.g., one Bachelor's, one Master's).
-   - DO NOT create more than 4 education entries total.
+   - Extract ONLY degrees/qualifications that are EXPLICITLY WRITTEN in the resume text.
+   - DO NOT create education entries using the example values from this prompt template.
+   - DO NOT invent "Bachelor of Technology in Computer Science" unless those EXACT words appear in the resume.
+   - Each person typically has 1-3 degrees. DO NOT create more than 4 entries.
    - DO NOT create education entries from awards, certifications, or achievements.
-   - DO NOT use company names (e.g., Tech Mahindra, Infosys) as institution names.
-   - DO NOT repeat the same degree multiple times with different fragments.
-   - If you find B.E. from Gondawana University, create ONE entry, not five.
-   - The "field" must be a real subject (Computer Science, Electronics, etc.), NOT a single letter.
-   - The "institution" must be a real school/university, NOT a section header or company.
+   - DO NOT use company names as institution names.
+   - If the resume says "B.E" do NOT expand it to "Bachelor of Technology" — keep it as "B.E".
+   - The institution must be a name that ACTUALLY APPEARS in the resume text.
 6. **EXPERIENCE**: If end_date is "Present", calculate duration until March 2026.
 7. **duration_years**: Decimal (2 years 6 months = 2.5).
 8. **total_experience_years**: Sum of all duration_years.
@@ -496,6 +495,142 @@ def _filter_valid_education(education_list: list) -> list:
         return []
     valid = [e for e in education_list if isinstance(e, dict) and _is_valid_education_entry(e)]
     return _deduplicate_education_entries(valid)
+    
+
+def _validate_education_against_text(education_list: List[Dict], resume_text: str) -> List[Dict]:
+    """
+    Remove education entries that have NO basis in the actual resume text.
+    Catches LLM hallucinations where it uses prompt examples as real data.
+    """
+    if not education_list or not resume_text:
+        return education_list
+
+    text_lower = resume_text.lower()
+    validated: List[Dict] = []
+
+    # Common words to ignore when checking institution/degree presence
+    ignore_words = {
+        'the', 'and', 'for', 'from', 'of', 'in', 'at', 'to', 'with',
+        'university', 'college', 'institute', 'school', 'academy',
+        'degree', 'bachelor', 'master', 'doctor', 'diploma',
+        'science', 'arts', 'technology', 'engineering',  # too generic alone
+    }
+
+    # Abbreviation mappings for degree validation
+    degree_abbreviations: Dict[str, List[str]] = {
+        'bachelor of technology': ['b.tech', 'btech', 'b tech', 'b.tech.'],
+        'master of technology': ['m.tech', 'mtech', 'm tech', 'm.tech.'],
+        'bachelor of engineering': ['b.e', 'b.e.', 'be'],
+        'master of engineering': ['m.e', 'm.e.', 'me'],
+        'bachelor of science': ['b.sc', 'b.sc.', 'bsc', 'b.s', 'b.s.', 'bs'],
+        'master of science': ['m.sc', 'm.sc.', 'msc', 'm.s', 'm.s.', 'ms'],
+        'bachelor of arts': ['b.a', 'b.a.', 'ba'],
+        'master of arts': ['m.a', 'm.a.', 'ma'],
+        'bachelor of commerce': ['b.com', 'b.com.', 'bcom'],
+        'master of commerce': ['m.com', 'm.com.', 'mcom'],
+        'bachelor of computer applications': ['bca', 'b.c.a', 'b.c.a.'],
+        'master of computer applications': ['mca', 'm.c.a', 'm.c.a.'],
+        'bachelor of business administration': ['bba', 'b.b.a', 'b.b.a.'],
+        'master of business administration': ['mba', 'm.b.a', 'm.b.a.'],
+        'doctor of philosophy': ['phd', 'ph.d', 'ph.d.'],
+    }
+
+    for edu in education_list:
+        if not isinstance(edu, dict):
+            continue
+
+        degree = str(edu.get("degree", "")).strip()
+        field_val = str(
+            edu.get("field", "")
+            or edu.get("major", "")
+            or edu.get("branch", "")
+            or edu.get("specialization", "")
+        ).strip()
+        institution = str(
+            edu.get("institution", "")
+            or edu.get("university", "")
+            or edu.get("college", "")
+        ).strip()
+
+        found_in_text = False
+
+        # ── Check 1: Institution name in resume text ──
+        if institution and len(institution) > 3:
+            inst_lower = institution.lower()
+
+            # Get significant words (not generic ones)
+            inst_words = [
+                w for w in inst_lower.split()
+                if len(w) > 3 and w not in ignore_words
+            ]
+
+            if inst_words:
+                # At least ONE significant institution word must appear in resume
+                if any(w in text_lower for w in inst_words):
+                    found_in_text = True
+            else:
+                # All words were generic — check full name
+                if inst_lower in text_lower:
+                    found_in_text = True
+
+        # ── Check 2: Degree in resume text ──
+        if not found_in_text and degree and len(degree) > 2:
+            degree_lower = degree.lower()
+
+            # Direct check
+            if degree_lower in text_lower:
+                found_in_text = True
+
+            # Check abbreviation forms
+            if not found_in_text:
+                for full_form, abbrs in degree_abbreviations.items():
+                    if full_form in degree_lower or degree_lower in full_form:
+                        if any(abbr in text_lower for abbr in abbrs):
+                            found_in_text = True
+                            break
+
+            # Check significant degree words (e.g., "PG" in "PG. B.E")
+            if not found_in_text:
+                degree_words = [
+                    w for w in degree_lower.split()
+                    if len(w) > 1 and w not in ignore_words
+                ]
+                if degree_words:
+                    # Need at least half the significant words to match
+                    matches = sum(1 for w in degree_words if w in text_lower)
+                    if matches >= max(1, len(degree_words) * 0.5):
+                        found_in_text = True
+
+        # ── Check 3: Field of study in resume text ──
+        if not found_in_text and field_val and len(field_val) > 3:
+            if field_val.lower() in text_lower:
+                found_in_text = True
+            else:
+                # Check significant words from field
+                field_words = [
+                    w for w in field_val.lower().split()
+                    if len(w) > 3 and w not in ignore_words
+                ]
+                if field_words and any(w in text_lower for w in field_words):
+                    found_in_text = True
+
+        # ── Verdict ──
+        if found_in_text:
+            validated.append(edu)
+        # else: silently dropped — it was hallucinated
+
+    # If ALL entries were dropped, return original (something wrong with our check)
+    # This prevents edge case where resume text is too short/garbled
+    if not validated and education_list:
+        # Only return original if we had entries and dropped everything
+        # Check if the resume actually mentions any education-related words
+        edu_indicators = ['degree', 'university', 'college', 'b.e', 'b.tech', 'mba',
+                          'bachelor', 'master', 'diploma', 'education', 'graduated']
+        if any(ind in text_lower for ind in edu_indicators):
+            # Resume has education content but our check is too strict — return original
+            return education_list
+
+    return validated
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1307,6 +1442,12 @@ def parse_resume_with_llm(
         parsed["education"] = _filter_valid_education([llm_education])
     else:
         parsed["education"] = []
+
+    # STEP 2c: Cross-validate education against actual resume text
+    # Removes entries the LLM hallucinated from prompt examples
+    parsed["education"] = _validate_education_against_text(
+        parsed["education"], resume_text
+    )
 
     # STEP 3: Merge contacts
     merged_contacts = _merge_contacts(parsed, regex_contacts, doc_contacts)
