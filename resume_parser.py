@@ -1777,6 +1777,24 @@ def parse_resume_with_llm(
             parsed["total_experience_years"] = calculated
         parsed["work_history"] = work_history
 
+    # 7a-sanity: Detect and fix hallucinated experience totals
+    # LLM sometimes returns inflated total_experience_years that doesn't
+    # match the actual work_history entries — cap it to reality
+    llm_total = parsed.get("total_experience_years", 0)
+    try:
+        llm_total = float(llm_total)
+    except (ValueError, TypeError):
+        llm_total = 0
+
+    if work_history:
+        calculated_from_entries = _calculate_total_experience(work_history)
+        if calculated_from_entries > 0:
+            # If LLM total is 1.5x+ the calculated total, it's hallucinated
+            if llm_total > calculated_from_entries * 1.5:
+                parsed["total_experience_years"] = calculated_from_entries
+            elif llm_total == 0:
+                parsed["total_experience_years"] = calculated_from_entries
+
     # 7b: ALWAYS try regex extraction for paragraph-format entries
     regex_work = _extract_work_experience_from_text(resume_text)
     if regex_work:
@@ -1799,7 +1817,20 @@ def parse_resume_with_llm(
 
         company_cleaned = re.sub(r'https?://\S+', '', company_raw)
         company_cleaned = re.sub(r'[,;]\s*\w+$', '', company_cleaned)
-        company_norm = re.sub(r'[^a-z0-9]', '', company_cleaned.lower())[:20]
+        company_cleaned = re.sub(r'\s*[-\u2013\u2014]\s*$', '', company_cleaned)
+        company_cleaned = company_cleaned.strip()
+
+        # Normalize: strip location words for better matching
+        # "Deloitte, Bengaluru" and "Deloitte" should match as same company
+        company_words = re.sub(r'[^a-z0-9\s]', '', company_cleaned.lower()).split()
+        location_words = {
+            'bangalore', 'bengaluru', 'mumbai', 'delhi', 'chennai', 'hyderabad',
+            'pune', 'kolkata', 'noida', 'gurgaon', 'gurugram', 'india',
+            'new', 'york', 'san', 'francisco', 'london', 'singapore',
+            'pvt', 'ltd', 'private', 'limited', 'inc', 'corp', 'llc',
+        }
+        company_core = [w for w in company_words if w not in location_words and len(w) > 1]
+        company_norm = ''.join(company_core)[:20] if company_core else ''.join(company_words)[:20]
 
         if not company_norm:
             company_norm = re.sub(r'[^a-z0-9]', '', title_raw.lower())[:20]
