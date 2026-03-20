@@ -1,5 +1,5 @@
 """
-Enhanced Resume Parser V10
+Enhanced Resume Parser V10.1
 - Triple extraction: Document Processor + Regex + LLM
 - Enhanced name extraction: 8 strategies including Regards/Declaration sections
 - Enhanced education validation + cross-validation against resume text
@@ -7,9 +7,12 @@ Enhanced Resume Parser V10
 - FIXED V10: Strict work entry validation — rejects sentences, descriptions, bullet text
 - FIXED V10: Section-aware extraction prevents date/text leaks from other sections
 - FIXED V10: LLM garbage entries filtered before merge
+- FIXED V10.1: Centralized email PIN-prefix cleaning applied to ALL sources
+- FIXED V10.1: Portfolio URL validation — rejects employer domains and mangled URLs
+- FIXED V10.1: Labeled format parsing (Role:, Company:, Duration:)
+- FIXED V10.1: Concatenated garbage in role titles cleaned
 - Independent experience calculation — NEVER trusts LLM totals
 - Spaced-out text detection
-- PIN-prefix email cleaning
 - Accurate experience calculation using CURRENT_YEAR = 2026
 """
 
@@ -81,7 +84,6 @@ _GARBAGE_WORK_WORDS: Set[str] = {
     "voice", "message", "routing", "optimization", "client",
 }
 
-# Words that indicate a line is a description/bullet, NOT a role title
 _DESCRIPTION_INDICATORS: Set[str] = {
     "experience in", "responsible for", "worked on", "working with",
     "good experience", "strong experience", "hands-on experience",
@@ -98,9 +100,10 @@ _DESCRIPTION_INDICATORS: Set[str] = {
     "detail project", "project overview", "workflow",
     "sequence 1", "sequence 2", "phase 1", "phase 2",
     "opex", "capex", "ip/mpls", "netconf", "yang",
+    "key responsibilities", "key achievements", "responsibilities include",
+    "duties include", "tasks include",
 }
 
-# Maximum reasonable lengths for role titles and company names
 _MAX_ROLE_LENGTH = 80
 _MAX_COMPANY_LENGTH = 100
 _MAX_ROLE_WORDS = 10
@@ -128,7 +131,6 @@ PRESENT_WORDS: Set[str] = {
     'till date', 'till now', 'to date', 'today', 'continuing',
 }
 
-# Section headers that signal END of work experience section
 _NON_WORK_SECTION_HEADERS: Set[str] = {
     'education', 'skills', 'certifications', 'certification',
     'awards', 'scholarships', 'awards & scholarships',
@@ -143,7 +145,6 @@ _NON_WORK_SECTION_HEADERS: Set[str] = {
     'tools and technologies', 'tools & technologies',
 }
 
-# Section headers that signal START of work experience section
 _WORK_SECTION_HEADERS: Set[str] = {
     'work experience', 'experience', 'professional experience',
     'employment history', 'employment', 'work history',
@@ -152,7 +153,6 @@ _WORK_SECTION_HEADERS: Set[str] = {
     'professional summary and experience',
 }
 
-# Known job title patterns — used for positive identification
 _JOB_TITLE_PATTERNS = [
     r'(?:Senior|Junior|Lead|Principal|Staff|Chief|Head|VP|Associate|Assistant)?\s*'
     r'(?:Software|Full[\s-]?Stack|Front[\s-]?End|Back[\s-]?End|Data|ML|AI|Cloud|DevOps|QA|Test|Mobile|Web|'
@@ -160,11 +160,23 @@ _JOB_TITLE_PATTERNS = [
     r'Deep\s*Learning|NLP|Computer\s*Vision|Big\s*Data|Business\s*Intelligence|BI|ETL|Solutions?|'
     r'Technical|Product|Program|Project|Operations?|IT|Application|Research|Analytics?|'
     r'Medical\s*Record|Quality|Customer\s*(?:Success|Support)|Sales|Marketing|HR|Finance|'
-    r'Embedded|Firmware|Hardware|VLSI|ASIC|FPGA|Robotics|Automation|RPA|SAP|Oracle|Salesforce)?\s*'
+    r'Embedded|Firmware|Hardware|VLSI|ASIC|FPGA|Robotics|Automation|RPA|SAP|Oracle|Salesforce|'
+    r'Python|Java|React|Angular|Node|Django|iOS|Android|Unity|Blockchain|Cyber\s*Security)?\s*'
     r'(?:Engineer(?:ing)?|Developer|Architect|Analyst|Scientist|Manager|Designer|Consultant|'
     r'Administrator|Coordinator|Specialist|Executive|Officer|Director|Intern|Trainee|'
     r'Programmer|Tester|Lead|Summarizer|Reviewer|Transcriptionist|Coder)',
 ]
+
+_EMPLOYER_DOMAINS: Set[str] = {
+    'ibm.com', 'google.com', 'microsoft.com', 'amazon.com', 'apple.com',
+    'facebook.com', 'meta.com', 'twitter.com', 'linkedin.com', 'github.com',
+    'infosys.com', 'wipro.com', 'tcs.com', 'cognizant.com', 'accenture.com',
+    'capgemini.com', 'hcl.com', 'datamatics.com', 'oracle.com', 'salesforce.com',
+    'netflix.com', 'uber.com', 'airbnb.com', 'spotify.com', 'stripe.com',
+    'adobe.com', 'intel.com', 'cisco.com', 'dell.com', 'hp.com', 'sap.com',
+    'deloitte.com', 'pwc.com', 'kpmg.com', 'ey.com', 'mckinsey.com',
+    'paypal.com', 'vmware.com', 'redhat.com', 'nvidia.com', 'qualcomm.com',
+}
 
 # ═══════════════════════════════════════════════════════════════
 #                    LLM PARSING PROMPT
@@ -261,7 +273,7 @@ Extract ALL information into this exact JSON structure (no markdown, no code blo
 CRITICAL RULES:
 1. NAME: The VERY FIRST non-empty line is usually the name.
 2. PHONE: Patterns like +91, +1, (XXX), or any 10+ digit numbers.
-3. EMAIL: Find ANYTHING with @ symbol.
+3. EMAIL: Find ANYTHING with @ symbol. Remove any leading PIN/ZIP digits before the email username.
 4. EDUCATION:
    - Extract ONLY degrees EXPLICITLY WRITTEN in the resume text.
    - DO NOT use example values from this template.
@@ -274,11 +286,12 @@ CRITICAL RULES:
 9. WORK HISTORY RULES:
    - Only include entries from the WORK EXPERIENCE section.
    - "title" must be a SHORT job title (e.g. "Python Developer", "Data Analyst").
-   - "title" must NOT be a sentence or description.
+   - "title" must NOT be a sentence or description or bullet point text.
    - "company" must be an actual company/organization name.
    - "company" must NOT be a sentence, description, or technical specification.
    - DO NOT extract project descriptions, bullet points, or technical details as work entries.
    - Each work entry must have clear start_date and end_date.
+10. PORTFOLIO: Only include personal portfolio/website URLs. Do NOT include employer company URLs.
 
 Return ONLY valid JSON."""
 
@@ -339,6 +352,53 @@ def _calc_duration_from_dates(start_str: str, end_str: str) -> float:
 
 
 # ═══════════════════════════════════════════════════════════════
+#               EMAIL CLEANING
+# ═══════════════════════════════════════════════════════════════
+
+def _clean_email(email: str) -> str:
+    """Clean an email address — remove PIN/ZIP prefixes, fix formatting."""
+    if not email or '@' not in email:
+        return email
+
+    email = email.strip()
+    email = re.sub(r'\s+', '', email)
+    email = re.sub(r'\[\s*at\s*\]|\(\s*at\s*\)', '@', email, flags=re.IGNORECASE)
+
+    if '@' not in email:
+        return email
+
+    local_part, domain = email.split('@', 1)
+
+    # Strategy 1: PIN/ZIP with separator (411046.user, 411046-user, 411046_user)
+    pin_match = re.match(r'^(\d{4,7})[.\-_](.+)$', local_part)
+    if pin_match:
+        remaining = pin_match.group(2)
+        if any(c.isalpha() for c in remaining) and len(remaining) >= 2:
+            local_part = remaining
+
+    # Strategy 2: PIN/ZIP without separator (411046sanketrg1997)
+    if not pin_match:
+        digit_prefix = re.match(r'^(\d{5,7})([a-zA-Z].*)$', local_part)
+        if digit_prefix:
+            remaining = digit_prefix.group(2)
+            if any(c.isalpha() for c in remaining) and len(remaining) >= 2:
+                local_part = remaining
+
+    # Strategy 3: ZIP code at END (user411046)
+    digit_suffix = re.match(r'^([a-zA-Z][\w.]*?)(\d{5,7})$', local_part)
+    if digit_suffix:
+        remaining = digit_suffix.group(1).rstrip('._')
+        if len(remaining) >= 3:
+            local_part = remaining
+
+    cleaned = f"{local_part}@{domain}"
+    if any(c.isalpha() for c in local_part) and len(local_part) >= 2:
+        return cleaned
+
+    return email
+
+
+# ═══════════════════════════════════════════════════════════════
 #         WORK ENTRY VALIDATION (STRENGTHENED)
 # ═══════════════════════════════════════════════════════════════
 
@@ -348,23 +408,19 @@ def _looks_like_sentence_or_description(text: str) -> bool:
         return False
     tl = text.lower().strip()
 
-    # Check against known description indicators
     for indicator in _DESCRIPTION_INDICATORS:
         if indicator in tl:
             return True
 
-    # Sentences typically have many words
     words = tl.split()
     if len(words) > _MAX_ROLE_WORDS:
         return True
 
-    # Contains punctuation typical of sentences but not titles
     if text.count(',') >= 2:
         return True
     if text.count('(') >= 2 or text.count(')') >= 2:
         return True
 
-    # Starts with a verb (typical of bullet points/descriptions)
     desc_starters = {
         'good', 'strong', 'excellent', 'having', 'worked', 'working',
         'responsible', 'involved', 'contributed', 'developed', 'designed',
@@ -377,7 +433,6 @@ def _looks_like_sentence_or_description(text: str) -> bool:
     if words and words[0] in desc_starters:
         return True
 
-    # Contains technical jargon patterns that indicate descriptions
     desc_patterns = [
         r'like\s+\w+', r'such\s+as', r'including\s+',
         r'using\s+\w+', r'with\s+\w+\s+and\s+',
@@ -389,7 +444,6 @@ def _looks_like_sentence_or_description(text: str) -> bool:
         if re.search(pat, tl):
             return True
 
-    # Check ratio of prepositions/articles to total words
     filler_words = {'in', 'a', 'an', 'the', 'of', 'for', 'to', 'and', 'or', 'with',
                     'from', 'by', 'on', 'is', 'was', 'are', 'were', 'has', 'have',
                     'like', 'using', 'over', 'its', 'it', 'that', 'which', 'this'}
@@ -406,7 +460,6 @@ def _is_valid_role_title(title: str) -> bool:
     if not title or not title.strip():
         return False
     t = title.strip()
-
     if len(t) > _MAX_ROLE_LENGTH:
         return False
     if len(t) < 3:
@@ -415,12 +468,9 @@ def _is_valid_role_title(title: str) -> bool:
         return False
     if _looks_like_sentence_or_description(t):
         return False
-
-    # Must have at least some alphabetic content
     alpha_ratio = sum(1 for c in t if c.isalpha()) / max(len(t), 1)
     if alpha_ratio < 0.6:
         return False
-
     return True
 
 
@@ -429,7 +479,6 @@ def _is_valid_company_name(company: str) -> bool:
     if not company or not company.strip():
         return False
     c = company.strip()
-
     if len(c) > _MAX_COMPANY_LENGTH:
         return False
     if len(c) < 2:
@@ -438,12 +487,9 @@ def _is_valid_company_name(company: str) -> bool:
         return False
     if _looks_like_sentence_or_description(c):
         return False
-
-    # Must have at least some alphabetic content
     alpha_ratio = sum(1 for ch in c if ch.isalpha()) / max(len(c), 1)
     if alpha_ratio < 0.5:
         return False
-
     return True
 
 
@@ -455,18 +501,14 @@ def _is_valid_work_entry(job: Dict) -> bool:
 
     if not title and not company:
         return False
-
-    # Reject if title looks like a description/sentence
     if title and not _is_valid_role_title(title):
         return False
-
-    # Reject if company looks like a description/sentence
     if company and not _is_valid_company_name(company):
         return False
 
     def _check_field(val):
         if not val:
-            return True  # empty is OK if the other field is valid
+            return True
         if len(val) < 2:
             return False
         words = val.lower().split()
@@ -487,15 +529,23 @@ def _clean_role_title(raw: str) -> str:
     """Clean and validate a role title extracted from resume."""
     if not raw:
         return ""
-    # Remove employment type suffixes
     cleaned = re.sub(
         r'\s*[\u2022•\-|,]\s*(?:Full[-\s]?time|Part[-\s]?time|Internship|Contract|Freelance|Temporary)\s*$',
         '', raw, flags=re.IGNORECASE
     ).strip()
-    # Remove trailing punctuation
     cleaned = cleaned.rstrip('•\u2022-|,.: ')
-    # Remove "Role :" prefix
-    cleaned = re.sub(r'^(?:Role|Position|Title|Designation)\s*[:]\s*', '', cleaned, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(
+        r'^(?:Role|Position|Title|Designation)\s*[:]\s*',
+        '', cleaned, flags=re.IGNORECASE
+    ).strip()
+    cleaned = re.sub(
+        r'(?:PROJECT|PROJECTS?)\s*(?:Sequence|Details?|Overview|Description|Summary|:).*$',
+        '', cleaned, flags=re.IGNORECASE
+    ).strip()
+    cleaned = re.sub(
+        r'(?:EXPERIENCE|EDUCATION|SKILLS|PROJECTS?|CERTIFICATIONS?|AWARDS?)\s*[:.]?\s*$',
+        '', cleaned, flags=re.IGNORECASE
+    ).strip()
     return cleaned
 
 
@@ -798,24 +848,12 @@ def _extract_contacts_regex(text: str) -> Dict:
         if m:
             email = m.group(0).strip()
             email = re.sub(r'^(?:email|e-mail|mail)[\s.:]*', '', email, flags=re.IGNORECASE)
-            email = re.sub(r'\s+', '', email)
-            email = re.sub(r'\[\s*at\s*\]|\(\s*at\s*\)', '@', email, flags=re.IGNORECASE)
-            if '@' in email:
-                local_part = email.split('@')[0]
-                pin_match = re.match(r'^(\d{4,7})[.\-_]', local_part)
-                if pin_match:
-                    email = email[len(pin_match.group(1)) + 1:]
-                if not pin_match:
-                    local_part = email.split('@')[0]
-                    digit_prefix = re.match(r'^(\d{5,7})([a-zA-Z])', local_part)
-                    if digit_prefix:
-                        email = local_part[len(digit_prefix.group(1)):] + '@' + email.split('@')[1]
-            if '@' in email and '.' in email.split('@')[-1]:
+            email = _clean_email(email)
+            if email and '@' in email and '.' in email.split('@')[-1]:
                 final_local = email.split('@')[0]
-                if any(c.isalpha() for c in final_local):
-                    if len(final_local) >= 2:
-                        contacts["email"] = email
-                        break
+                if any(c.isalpha() for c in final_local) and len(final_local) >= 2:
+                    contacts["email"] = email
+                    break
 
     # ═══════ PHONE ═══════
     phone_patterns = [
@@ -866,17 +904,31 @@ def _extract_contacts_regex(text: str) -> Dict:
             contacts["github"] = m.group(0).strip()
             break
 
-    # ═══════ PORTFOLIO ═══════
+    # ═══════ PORTFOLIO (STRICT) ═══════
     portfolio_patterns = [
         r'(?:portfolio|website|web|site|blog)[\s.:]+(?:https?://)?[\w.-]+\.[a-z]{2,}[\w/.-]*',
         r'(?:https?://)?(?:www\.)?[\w-]+\.(?:dev|io|me|tech|design|codes?|site|online|app)/?[\w/.-]*',
     ]
     for p in portfolio_patterns:
         for match in re.findall(p, text, re.IGNORECASE):
-            url = re.sub(r'^(?:portfolio|website|web|site|blog)[\s.:]+', '', match, flags=re.IGNORECASE).strip()
+            url = re.sub(
+                r'^(?:portfolio|website|web|site|blog)[\s.:]+',
+                '', match, flags=re.IGNORECASE
+            ).strip()
             url_lower = url.lower()
-            if ('linkedin' not in url_lower and 'github' not in url_lower
-                    and '@' not in url and 'ibm.com' not in url_lower):
+            if 'linkedin' in url_lower or 'github' in url_lower:
+                continue
+            if '@' in url:
+                continue
+            if any(domain in url_lower for domain in _EMPLOYER_DOMAINS):
+                continue
+            url_path = url.split('/', 3)[-1] if '/' in url else ''
+            if url_path:
+                if re.search(r'[A-Z]{3,}', url_path):
+                    continue
+                if re.search(r'-[A-Z][a-z]+[A-Z]', url_path):
+                    continue
+            if len(url) > 10:
                 contacts["portfolio"] = url
                 break
         if contacts["portfolio"]:
@@ -894,7 +946,10 @@ def _extract_contacts_regex(text: str) -> Dict:
         m = re.search(p, text, re.IGNORECASE)
         if m:
             addr = (m.group(1) if m.lastindex else m.group(0)).strip()
-            addr = re.sub(r'^(?:Address|Location|Residence|Home|Addr)[\s.:]+', '', addr, flags=re.IGNORECASE).strip()
+            addr = re.sub(
+                r'^(?:Address|Location|Residence|Home|Addr)[\s.:]+',
+                '', addr, flags=re.IGNORECASE
+            ).strip()
             addr = addr.lstrip("'\"\u2018\u2019")
             if 15 < len(addr) < 200:
                 contacts["address"] = addr
@@ -920,7 +975,10 @@ def _extract_contacts_regex(text: str) -> Dict:
         m = re.search(p, text, re.IGNORECASE)
         if m:
             loc = (m.group(1) if m.lastindex else m.group(0)).strip()
-            loc = re.sub(r'^(?:Location|Based in|Located at|City|Current Location)[\s.:]+', '', loc, flags=re.IGNORECASE).strip()
+            loc = re.sub(
+                r'^(?:Location|Based in|Located at|City|Current Location)[\s.:]+',
+                '', loc, flags=re.IGNORECASE
+            ).strip()
             if 2 <= len(loc) <= 100:
                 contacts["location"] = loc
                 break
@@ -954,14 +1012,12 @@ def _extract_name_from_text(text: str) -> str:
             'signature', 'company', 'corporation', 'limited', 'pvt', 'ltd',
             'more', 'voice', 'message', 'routing', 'optimization']
 
-    # Strategy 1: Labeled name
     for p in [r'(?:Name|Full Name|Candidate Name|Applicant Name)[\s.:]+([A-Z][a-zA-Z]+(?:\s+[A-Z]\.?\s*)?(?:\s+[A-Z][a-zA-Z]+){1,2})',
               r'(?:Name|Full Name)[\s.:]+([A-Z][A-Z\s]+)']:
         m = re.search(p, text, re.IGNORECASE)
         if m and _is_valid_name(m.group(1).strip()):
             return _clean_name(m.group(1).strip())
 
-    # Strategy 1.5: ALL-CAPS multi-word name in first 20 lines
     for line in lines[:20]:
         line = line.strip()
         if not line or len(line) < 5 or len(line) > 50:
@@ -981,7 +1037,6 @@ def _extract_name_from_text(text: str) -> str:
                 if _is_valid_name(tn):
                     return _clean_name(tn)
 
-    # Strategy 2: First line that looks like a name
     for line in lines[:15]:
         line = line.strip()
         if not line or len(line) < 4 or len(line) > 45:
@@ -1007,19 +1062,16 @@ def _extract_name_from_text(text: str) -> str:
             if _is_valid_name(line):
                 return _clean_name(line)
 
-    # Strategy 3: First line mixed content
     if lines:
         m = re.match(r'^([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?(?:\s+[A-Z][a-z]+){1,2})', lines[0].strip())
         if m and _is_valid_name(m.group(1).strip()):
             return _clean_name(m.group(1).strip())
 
-    # Strategy 4: "I am" / "My name is"
     for p in [r"(?:I am|I'm|My name is|This is|Myself)\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?(?:\s+[A-Z][a-z]+){1,2})"]:
         m = re.search(p, text, re.IGNORECASE)
         if m and _is_valid_name(m.group(1).strip()):
             return _clean_name(m.group(1).strip())
 
-    # Strategy 5: From email
     em = re.search(r'([\w.]+)@', text)
     if em:
         parts = re.split(r'[._]', em.group(1))
@@ -1028,7 +1080,6 @@ def _extract_name_from_text(text: str) -> str:
             if len(pn.split()) >= 2:
                 return pn
 
-    # Strategy 6: ALL CAPS line (first 10 lines)
     headers = {'RESUME', 'CURRICULUM', 'VITAE', 'CV', 'OBJECTIVE', 'SUMMARY', 'EXPERIENCE', 'EDUCATION',
                'SKILLS', 'CONTACT', 'PROFILE', 'ABOUT', 'PROJECTS', 'CERTIFICATIONS', 'ACHIEVEMENTS',
                'AWARDS', 'REFERENCES', 'DECLARATION', 'PERSONAL', 'PROFESSIONAL', 'TECHNICAL', 'WORK',
@@ -1043,7 +1094,6 @@ def _extract_name_from_text(text: str) -> str:
                 if _is_valid_name(tn):
                     return tn
 
-    # Strategy 7: Name after "Regards"
     for p in [r'(?:Regards|Sincerely|Yours\s+(?:truly|faithfully|sincerely)|'
               r'Thank\s*(?:you|s)|Best\s+regards|Kind\s+regards|Warm\s+regards|'
               r'Respectfully|Cordially)\s*[,.]?\s*\n\s*'
@@ -1052,7 +1102,6 @@ def _extract_name_from_text(text: str) -> str:
         if m and _is_valid_name(m.group(1).strip()):
             return _clean_name(m.group(1).strip())
 
-    # Strategy 8: Declaration
     for p in [r'(?:Declaration|I\s+hereby\s+declare).+?(?:Date|Location|Place|Regards)\s*[:\s]*\w*\s*\n\s*'
               r'([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){1,3})\s*$']:
         m = re.search(p, text, re.IGNORECASE | re.DOTALL)
@@ -1119,7 +1168,6 @@ def _extract_work_section(text: str) -> str:
         if cleaned in _WORK_SECTION_HEADERS or any(cleaned == h for h in _WORK_SECTION_HEADERS):
             work_start = i + 1
             break
-        # Also check if line contains the header with some formatting
         for header in _WORK_SECTION_HEADERS:
             if header in cleaned and len(cleaned) < len(header) + 15:
                 work_start = i + 1
@@ -1148,7 +1196,7 @@ def _extract_work_section(text: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════
-#        WORK EXPERIENCE EXTRACTION (COMPLETELY REWRITTEN)
+#        WORK EXPERIENCE EXTRACTION (V10.1)
 # ═══════════════════════════════════════════════════════════════
 
 def _is_role_line(line: str) -> bool:
@@ -1157,35 +1205,54 @@ def _is_role_line(line: str) -> bool:
         return False
     stripped = line.strip()
 
-    # Bullet points are NEVER role lines
     if stripped.startswith(('•', '-', '*', '\u2022', '\u25e6', '\u2023', '\u2043')):
         return False
-
-    # Lines starting with common description words are not roles
     if _looks_like_sentence_or_description(stripped):
         return False
-
-    # Too long to be a role title
     if len(stripped) > _MAX_ROLE_LENGTH:
         return False
 
-    # Check if it matches known job title patterns
-    for pattern in _JOB_TITLE_PATTERNS:
-        if re.search(pattern, stripped, re.IGNORECASE):
-            return True
-
-    # Check for "Role • Type" format
-    if re.match(r'^[^•\n]+\s*[\u2022•]\s*(?:Full[-\s]?time|Part[-\s]?time|Internship|Contract|Freelance)',
-                stripped, re.IGNORECASE):
-        return True
-
-    # Check for "Role : Some Title" format
-    role_prefix = re.match(r'^(?:Role|Position|Title|Designation)\s*[:]\s*(.+)', stripped, re.IGNORECASE)
+    # Check for "Role : Python Developer" format
+    role_prefix = re.match(
+        r'^(?:Role|Position|Title|Designation)\s*[:]\s*(.+?)(?:\s*[\u2022•|]|$)',
+        stripped, re.IGNORECASE
+    )
     if role_prefix:
         candidate = role_prefix.group(1).strip()
-        for pattern in _JOB_TITLE_PATTERNS:
-            if re.search(pattern, candidate, re.IGNORECASE):
-                return True
+        if candidate and not _looks_like_sentence_or_description(candidate):
+            for pattern in _JOB_TITLE_PATTERNS:
+                if re.search(pattern, candidate, re.IGNORECASE):
+                    return True
+
+    for pattern in _JOB_TITLE_PATTERNS:
+        match = re.search(pattern, stripped, re.IGNORECASE)
+        if match:
+            words_before_match = stripped[:match.start()].strip()
+            if words_before_match:
+                wb_words = words_before_match.split()
+                if len(wb_words) > 3:
+                    continue
+                title_prefixes = {
+                    'senior', 'junior', 'lead', 'principal', 'staff', 'chief',
+                    'head', 'vp', 'associate', 'assistant', 'deputy', 'sr', 'jr',
+                    'sr.', 'jr.', 'python', 'java', 'data', 'ml', 'ai', 'cloud',
+                    'devops', 'full', 'stack', 'front', 'back', 'end', 'full-stack',
+                    'frontend', 'backend', 'mobile', 'web', 'qa', 'test', 'embedded',
+                    'network', 'system', 'security', 'database', 'platform',
+                    'technical', 'product', 'project', 'program', 'operations',
+                    'medical', 'record', 'business', 'intelligence',
+                    'machine', 'learning', 'deep', 'nlp', 'computer', 'vision',
+                    'site', 'reliability', '-', '\u2013', '/', '&',
+                }
+                if not all(w.lower().strip('.,()') in title_prefixes for w in wb_words):
+                    continue
+            return True
+
+    if re.match(r'^[^•\n]+\s*[\u2022•]\s*(?:Full[-\s]?time|Part[-\s]?time|Internship|Contract|Freelance)',
+                stripped, re.IGNORECASE):
+        pre_bullet = re.split(r'\s*[\u2022•]\s*', stripped)[0].strip()
+        if pre_bullet and not _looks_like_sentence_or_description(pre_bullet) and len(pre_bullet) < 60:
+            return True
 
     return False
 
@@ -1196,17 +1263,13 @@ def _is_company_line(line: str) -> bool:
         return False
     stripped = line.strip()
 
-    # Bullet points are NEVER company lines
     if stripped.startswith(('•', '-', '*', '\u2022', '\u25e6', '\u2023', '\u2043')):
         return False
-
     if _looks_like_sentence_or_description(stripped):
         return False
-
     if len(stripped) > _MAX_COMPANY_LENGTH:
         return False
 
-    # Company indicators
     company_indicators = [
         r'(?:Pvt|Private|Ltd|Limited|Inc|Corp|LLC|LLP|Co\.|Company|Group|Solutions|'
         r'Technologies|Consulting|Services|Systems|Soft(?:ware)?|Tech|Labs?|Studio|'
@@ -1217,7 +1280,6 @@ def _is_company_line(line: str) -> bool:
         if re.search(pat, stripped, re.IGNORECASE):
             return True
 
-    # Contains location separator pattern: "Company • Location"
     if re.match(r'^[^•]+\s*[\u2022•]\s*[A-Z][a-z]+', stripped):
         return True
 
@@ -1229,7 +1291,6 @@ def _is_date_line(line: str) -> bool:
     if not line or not line.strip():
         return False
     stripped = line.strip()
-    # Remove the date part and see what's left
     date_range_pattern = r'\d{1,2}[/\-\.]\d{4}\s*[-\u2013\u2014]\s*(?:\d{1,2}[/\-\.]\d{4}|[Pp]resent|[Cc]urrent)'
     month_range_pattern = (r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\.?\s*\d{4}\s*'
                            r'[-\u2013\u2014]\s*(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\.?\s*\d{4}|'
@@ -1241,7 +1302,6 @@ def _is_date_line(line: str) -> bool:
         if m:
             remainder = stripped[:m.start()].strip() + stripped[m.end():].strip()
             remainder = remainder.strip('•\u2022-|,.: ')
-            # If most of the line is the date, it's a date line
             if len(remainder) < len(stripped) * 0.3:
                 return True
     return False
@@ -1252,7 +1312,6 @@ def _extract_date_range(text: str) -> Tuple[str, str]:
     if not text:
         return "", ""
 
-    # MM/YYYY - MM/YYYY or MM/YYYY - Present
     m = re.search(
         r'(\d{1,2}[/\-\.]\d{4})\s*[-\u2013\u2014]\s*(\d{1,2}[/\-\.]\d{4}|[Pp]resent|[Cc]urrent(?:ly)?|[Nn]ow|[Oo]ngoing)',
         text, re.IGNORECASE
@@ -1260,7 +1319,6 @@ def _extract_date_range(text: str) -> Tuple[str, str]:
     if m:
         return m.group(1), m.group(2)
 
-    # Month Year - Month Year
     m = re.search(
         r'((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\.?\s*\d{4})\s*'
         r'[-\u2013\u2014]\s*'
@@ -1271,7 +1329,6 @@ def _extract_date_range(text: str) -> Tuple[str, str]:
     if m:
         return m.group(1), m.group(2)
 
-    # Year - Year
     m = re.search(
         r'((?:19|20)\d{2})\s*[-\u2013\u2014]\s*((?:19|20)\d{2}|[Pp]resent|[Cc]urrent(?:ly)?|[Nn]ow|[Oo]ngoing)',
         text, re.IGNORECASE
@@ -1283,16 +1340,7 @@ def _extract_date_range(text: str) -> Tuple[str, str]:
 
 
 def _extract_work_experience_from_text(text: str) -> List[Dict]:
-    """Extract work experience entries from resume text.
-
-    V10 FIXES:
-    - Strictly validates role titles — rejects sentences/descriptions
-    - Strictly validates company names — rejects technical text
-    - Section-aware: only parses within WORK EXPERIENCE section
-    - Multi-line structured format support with positive identification
-    - Narrative patterns as fallback only
-    - NO blind date-range scanning
-    """
+    """Extract work experience entries from resume text (V10.1)."""
     if not text:
         return []
 
@@ -1336,45 +1384,106 @@ def _extract_work_experience_from_text(text: str) -> List[Dict]:
                 i += 1
                 continue
 
-            # Skip bullet points and descriptions
             if line.startswith(('•', '-', '*', '\u2022', '\u25e6', '\u2023', '\u2043')):
                 i += 1
                 continue
 
-            # Must positively identify as a role line
+            # ── Check for labeled fields: "Role : Python Developer" ──
+            role_label_match = re.match(
+                r'^(?:Role|Position|Title|Designation)\s*[:]\s*(.+?)(?:\s*[\u2022•|]|$)',
+                line, re.IGNORECASE
+            )
+            company_label_match = re.match(
+                r'^(?:Company|Organization|Employer|Client)\s*[:]\s*(.+?)(?:\s*[\u2022•|]|$)',
+                line, re.IGNORECASE
+            )
+
+            # ── Strategy A: Labeled format (Role:, Company:, Duration:) ──
+            if role_label_match or company_label_match:
+                role = ""
+                company = ""
+                location = ""
+                start_date = ""
+                end_date = ""
+                emp_type = "Full-time"
+
+                j = i
+                while j < len(ws_lines):
+                    cl = ws_lines[j].strip()
+                    if not cl:
+                        j += 1
+                        continue
+                    if cl.startswith(('•', '-', '*', '\u2022', '\u25e6', '\u2023')):
+                        break
+
+                    rl = re.match(r'^(?:Role|Position|Title|Designation)\s*[:]\s*(.+)', cl, re.IGNORECASE)
+                    cml = re.match(r'^(?:Company|Organization|Employer|Client)\s*[:]\s*(.+)', cl, re.IGNORECASE)
+                    dl = re.match(r'^(?:Duration|Period|Tenure|Dates?|From|Timeline)\s*[:]\s*(.+)', cl, re.IGNORECASE)
+                    ll = re.match(r'^(?:Location|City|Place)\s*[:]\s*(.+)', cl, re.IGNORECASE)
+                    tl_match = re.match(r'^(?:Type|Employment\s*Type|Mode)\s*[:]\s*(.+)', cl, re.IGNORECASE)
+
+                    if rl:
+                        role = _clean_role_title(rl.group(1).strip())
+                    elif cml:
+                        company = _clean_company_name(cml.group(1).strip())
+                    elif dl:
+                        date_text = dl.group(1).strip()
+                        s, e = _extract_date_range(date_text)
+                        if s:
+                            start_date = s
+                            end_date = e
+                    elif ll:
+                        location = ll.group(1).strip()
+                    elif tl_match:
+                        emp_type = tl_match.group(1).strip()
+                    else:
+                        if _is_date_line(cl):
+                            s, e = _extract_date_range(cl)
+                            if s and not start_date:
+                                start_date = s
+                                end_date = e
+                        elif _is_role_line(cl) and role:
+                            break
+                        elif _is_company_line(cl) and not company:
+                            company = _clean_company_name(cl)
+                        else:
+                            if j > i + 1:
+                                break
+                    j += 1
+
+                if role or company:
+                    _add(role or "Not specified", company or "Not specified",
+                         start_date, end_date, location, emp_type)
+                i = j
+                continue
+
+            # ── Strategy B: Standard multi-line format ──
             if not _is_role_line(line):
-                # Could be a company line with dates, or a date-only line — skip
                 i += 1
                 continue
 
-            # ── Found a role line ──
             role_line = line
             emp_type = "Full-time"
 
-            # Extract employment type
             type_match = re.search(
                 r'\s*[\u2022•\-|,]\s*(Full[-\s]?time|Part[-\s]?time|Internship|Contract|Freelance|Temporary)\s*$',
                 role_line, re.IGNORECASE
             )
             if type_match:
-                emp_type = type_match.group(1).strip().replace('-', '-')
+                emp_type = type_match.group(1).strip()
                 role_line = role_line[:type_match.start()].strip().rstrip('•\u2022-|, ')
 
-            # Clean role
             role_line = _clean_role_title(role_line)
             if not role_line or not _is_valid_role_title(role_line):
                 i += 1
                 continue
 
-            # Check if role line itself contains date range
             role_start, role_end = _extract_date_range(line)
             if role_start:
-                # Remove dates from role text
                 role_line = re.sub(
                     r'\s*\d{1,2}[/\-\.]\d{4}\s*[-\u2013\u2014].*$', '', role_line
                 ).strip().rstrip('•\u2022-|, ')
 
-            # ── Look ahead for company and dates ──
             company = ""
             location = ""
             start_date = role_start
@@ -1391,15 +1500,12 @@ def _extract_work_experience_from_text(text: str) -> List[Dict]:
                     j += 1
                     continue
 
-                # Stop at bullet points — we've entered description territory
                 if next_line.startswith(('•', '-', '*', '\u2022', '\u25e6', '\u2023', '\u2043')):
                     break
 
-                # Stop if we hit another role line (start of next entry)
                 if _is_role_line(next_line) and found_company:
                     break
 
-                # Check if pure date line
                 if _is_date_line(next_line) and not found_dates:
                     s, e = _extract_date_range(next_line)
                     if s:
@@ -1409,13 +1515,10 @@ def _extract_work_experience_from_text(text: str) -> List[Dict]:
                     j += 1
                     continue
 
-                # Check if company line (may have dates embedded)
                 if not found_company:
-                    # Try to extract dates from this line
                     line_start, line_end = _extract_date_range(next_line)
 
                     if line_start:
-                        # Line has dates — extract company from the part before dates
                         date_match = re.search(
                             r'\d{1,2}[/\-\.]\d{4}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)',
                             next_line, re.IGNORECASE
@@ -1425,8 +1528,7 @@ def _extract_work_experience_from_text(text: str) -> List[Dict]:
                         else:
                             pre_date = next_line
 
-                        if pre_date:
-                            # Split by bullet separator
+                        if pre_date and not _looks_like_sentence_or_description(pre_date):
                             parts = re.split(r'\s*[\u2022•]\s*', pre_date)
                             parts = [p.strip() for p in parts if p.strip()]
                             if parts:
@@ -1440,38 +1542,32 @@ def _extract_work_experience_from_text(text: str) -> List[Dict]:
                             found_dates = True
                         found_company = True
 
-                    elif _is_company_line(next_line) or (not _is_role_line(next_line) and not _looks_like_sentence_or_description(next_line)):
-                        # Treat as company line
+                    elif (_is_company_line(next_line) or
+                          (not _is_role_line(next_line) and
+                           not _looks_like_sentence_or_description(next_line) and
+                           len(next_line) < _MAX_COMPANY_LENGTH)):
                         parts = re.split(r'\s*[\u2022•]\s*', next_line)
                         parts = [p.strip() for p in parts if p.strip()]
-                        # Filter out employment types
                         parts = [p for p in parts if p.lower() not in
-                                 ('full-time', 'part-time', 'internship', 'contract', 'freelance', 'temporary',
-                                  'full time', 'part time')]
+                                 ('full-time', 'part-time', 'internship', 'contract',
+                                  'freelance', 'temporary', 'full time', 'part time')]
                         if parts:
                             company = parts[0]
                             if len(parts) > 1:
-                                # Check if remaining parts are locations
                                 for p in parts[1:]:
-                                    if any(lw in p.lower() for lw in LOCATION_WORDS) or len(p.split()) <= 2:
+                                    s, e = _extract_date_range(p)
+                                    if s and not found_dates:
+                                        start_date = s
+                                        end_date = e
+                                        found_dates = True
+                                    elif any(lw in p.lower() for lw in LOCATION_WORDS) or len(p.split()) <= 2:
                                         location = p
-                                    else:
-                                        # Might be a date
-                                        s, e = _extract_date_range(p)
-                                        if s and not found_dates:
-                                            start_date = s
-                                            end_date = e
-                                            found_dates = True
                         found_company = True
 
                 j += 1
 
-            # ── Validate and add the entry ──
             if role_line and (company or start_date):
-                # Clean company name
                 company = _clean_company_name(company)
-
-                # Extract location from company if embedded
                 if company and not location:
                     loc_match = re.search(
                         r'\s*[\u2022•,]\s*(Pondicherry|Puducherry|Chennai|Hyderabad|Bangalore|Bengaluru|'
@@ -1483,65 +1579,58 @@ def _extract_work_experience_from_text(text: str) -> List[Dict]:
                         company = company[:loc_match.start()].strip().rstrip(',•\u2022 ')
 
                 _add(role_line, company, start_date, end_date, location, emp_type)
-                i = j  # Skip past consumed lines
+                i = j
             else:
                 i += 1
 
     # ══════════════════════════════════════════════════════
-    # PHASE 2: Narrative patterns (full text) — only if structured parsing found nothing
+    # PHASE 2: Narrative patterns (full text) — only if nothing found
     # ══════════════════════════════════════════════════════
     if not work_entries:
-        # Date building blocks for narrative patterns
         MY = (r'(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|'
               r'Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)[.,]?\s*\d{4}')
         ND = r'\d{1,2}[/\-\.]\d{4}'
         NDR = r'\d{4}[/\-\.]\d{1,2}'
         MA = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)['\u2019]\s*\d{2,4}"
-        PK = r'(?:[Pp]resent|[Cc]urrent(?:ly)?|[Nn]ow|[Oo]ngoing|[Tt]ill\s*[Dd]ate|[Tt]ill\s*[Nn]ow|[Tt]o\s*[Dd]ate|[Tt]oday|[Cc]ontinuing)'
+        PK = r'(?:[Pp]resent|[Cc]urrent(?:ly)?|[Nn]ow|[Oo]ngoing|[Tt]ill\s*[Dd]ate)'
         JY = r'(?:19|20)\d{2}'
         AD = f'(?:{MY}|{ND}|{NDR}|{MA}|{PK}|{JY})'
         DS = r'\s*(?:to|till|until|[-\u2013\u2014])\s*'
 
-        # "currently working/employed as X at Y since/from DATE to DATE"
         for m in re.finditer(
             r'(?:currently\s+)?(?:working|employed|serving)\s+(?:as\s+)?(.+?)\s+(?:with|at|in|for)\s+(.+?)\s*'
             rf'(?:since|from)\s+({AD}){DS}({AD})(?:\s*[.\n]|$)', text, re.IGNORECASE):
             role_candidate = m.group(1).strip()
             company_candidate = m.group(2).strip()
-            if _is_valid_role_title(role_candidate):
+            if _is_valid_role_title(_clean_role_title(role_candidate)):
                 _add(role_candidate, company_candidate, m.group(3), m.group(4))
 
-        # "worked/employed/served as X at Y from DATE to DATE"
         for m in re.finditer(
             r'(?:worked|employed|served|joined|was)\s+(?:as\s+)?(.+?)\s+(?:at|with|in|for)\s+(.+?)\s*'
             rf'(?:from|since)\s+({AD}){DS}({AD})(?:[.\n,;]|$)', text, re.IGNORECASE):
             role_candidate = m.group(1).strip()
             company_candidate = m.group(2).strip()
-            if _is_valid_role_title(role_candidate):
+            if _is_valid_role_title(_clean_role_title(role_candidate)):
                 _add(role_candidate, company_candidate, m.group(3), m.group(4))
 
-        # Tabular "Role at Company, DATE - DATE"
         for m in re.finditer(
             rf'^(.+?)\s+(?:at|with|@)\s+(.+?)\s*[,|]\s*({AD}){DS}({AD})(?:\s*[.\n]|$)',
             text, re.IGNORECASE | re.MULTILINE):
             role_candidate = m.group(1).strip()
             company_candidate = m.group(2).strip()
             if (len(role_candidate) <= _MAX_ROLE_LENGTH and len(company_candidate) <= _MAX_COMPANY_LENGTH
-                    and _is_valid_role_title(role_candidate)):
+                    and _is_valid_role_title(_clean_role_title(role_candidate))):
                 if not any(s in role_candidate.lower() for s in
                            ['education', 'project', 'skill', 'certification', 'award', 'summary']):
                     _add(role_candidate, company_candidate, m.group(3), m.group(4))
 
-        # Pipe separated "Company | Role | DATE - DATE"
         for m in re.finditer(
             rf'(.+?)\s*\|\s*(.+?)\s*\|\s*({AD}){DS}({AD})(?:\s*[.\n]|$)', text, re.IGNORECASE):
             company_candidate = m.group(1).strip()
             role_candidate = m.group(2).strip()
             if (len(role_candidate) <= _MAX_ROLE_LENGTH and len(company_candidate) <= _MAX_COMPANY_LENGTH
-                    and _is_valid_role_title(role_candidate)):
+                    and _is_valid_role_title(_clean_role_title(role_candidate))):
                 _add(role_candidate, company_candidate, m.group(3), m.group(4))
-
-    # NOTE: NO Pattern 6 blind date-range fallback — this was the main source of garbage entries
 
     return work_entries
 
@@ -1710,7 +1799,7 @@ def _extract_skills_regex(text: str) -> Dict:
 
 
 # ═══════════════════════════════════════════════════════════════
-#                    CONTACT VALIDATION
+#                    CONTACT VALIDATION & MERGE
 # ═══════════════════════════════════════════════════════════════
 
 def _is_valid_field(field: str, value: str) -> bool:
@@ -1723,13 +1812,27 @@ def _is_valid_field(field: str, value: str) -> bool:
                               'full name', '[name]', '<name>', '(name)', 'enter name', 'type name']:
         return False
     if field == 'email':
-        return '@' in v and '.' in v.split('@')[-1]
+        if '@' not in v or '.' not in v.split('@')[-1]:
+            return False
+        local_part = v.split('@')[0]
+        if local_part.isdigit():
+            return False
+        if not any(c.isalpha() for c in local_part):
+            return False
+        return True
     if field == 'phone':
         return len(re.sub(r'[^\d]', '', v)) >= 10
     if field == 'name':
         return _is_valid_name(v)
     if field in ('linkedin', 'github'):
         return len(v) > 5
+    if field == 'portfolio':
+        vl = v.lower()
+        if any(d in vl for d in _EMPLOYER_DOMAINS):
+            return False
+        if re.search(r'[A-Z]{3,}', v.split('/')[-1] if '/' in v else ''):
+            return False
+        return len(v) >= 5
     return len(v) >= 2
 
 
@@ -1738,7 +1841,16 @@ def _merge_contacts(llm: Dict, regex: Dict, doc: Optional[Dict] = None) -> Dict:
     if doc is None:
         doc = {}
     for f in ['name', 'email', 'phone', 'address', 'linkedin', 'github', 'portfolio', 'location']:
-        lv, dv, rv = str(llm.get(f, "")).strip(), str(doc.get(f, "")).strip(), str(regex.get(f, "")).strip()
+        lv = str(llm.get(f, "")).strip()
+        dv = str(doc.get(f, "")).strip()
+        rv = str(regex.get(f, "")).strip()
+
+        # Clean emails from ALL sources before validation
+        if f == 'email':
+            lv = _clean_email(lv)
+            dv = _clean_email(dv)
+            rv = _clean_email(rv)
+
         if lv and _is_valid_field(f, lv):
             merged[f] = lv
         elif dv and _is_valid_field(f, dv):
@@ -1800,7 +1912,8 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
                 "NEVER use prompt template examples as real data. "
                 "Only extract what is ACTUALLY WRITTEN in the resume. "
                 "For work_history, title must be a SHORT job title (e.g. 'Software Engineer'). "
-                "NEVER put sentences or descriptions as title or company."
+                "NEVER put sentences or descriptions as title or company. "
+                "For portfolio, only include personal websites, NOT employer company URLs."
             )},
             {"role": "user", "content": PARSE_PROMPT.format(resume_text=resume_text[:12000])}
         ],
@@ -1845,6 +1958,15 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
     for f, v in mc.items():
         if v and (not parsed.get(f) or not _is_valid_field(f, parsed.get(f, ""))):
             parsed[f] = v
+
+    # STEP 3b: Force-clean email regardless of source
+    if parsed.get("email"):
+        parsed["email"] = _clean_email(parsed["email"])
+
+    # STEP 3c: Validate portfolio isn't an employer URL
+    if parsed.get("portfolio"):
+        if not _is_valid_field("portfolio", parsed["portfolio"]):
+            parsed["portfolio"] = ""
 
     # STEP 4: Name
     cn = parsed.get("name", "")
@@ -1914,14 +2036,13 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
     parsed["skills"] = ls
 
     # ══════════════════════════════════════════════════════
-    # STEP 7: Work Experience (V10 — strict validation)
+    # STEP 7: Work Experience (V10.1 — strict validation)
     # ══════════════════════════════════════════════════════
 
     # 7a: Validate LLM work entries STRICTLY
     work_history = parsed.get("work_history", parsed.get("experience", []))
     if not isinstance(work_history, list):
         work_history = []
-    # Apply strict validation to EVERY LLM entry
     validated_llm_work = []
     for j in work_history:
         if not isinstance(j, dict):
@@ -1929,11 +2050,9 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
         title = str(j.get("title", "") or j.get("role", "") or j.get("position", "")).strip()
         company = str(j.get("company", "") or j.get("organization", "")).strip()
 
-        # Clean them
         title = _clean_role_title(title)
         company = _clean_company_name(company)
 
-        # Strict validation
         if not _is_valid_role_title(title):
             continue
         if company and not _is_valid_company_name(company):
@@ -1941,7 +2060,6 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
         if not title and not company:
             continue
 
-        # Update the entry with cleaned values
         j["title"] = title
         j["company"] = company
         validated_llm_work.append(j)
@@ -1956,7 +2074,6 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
         if not work_history:
             work_history = regex_work
         else:
-            # Build company key set from LLM results
             llm_company_keys: Set[str] = set()
             for j in work_history:
                 co = str(j.get('company', '') or j.get('organization', '') or '').strip()
@@ -1993,20 +2110,13 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
         ss = str(j.get('start_date', j.get('from', '')))
         es = str(j.get('end_date', j.get('to', '')))
         idur = _calc_duration_from_dates(ss, es) if ss else 0.0
-        # Quality score
         q = idur
-        if ss and es:
-            q += 1.0
-        if ss:
-            q += 0.5
-        if ti_raw and ti_raw != "Not specified":
-            q += 2.0
-        if co_raw and co_raw != "Not specified":
-            q += 2.0
-        if j.get('description'):
-            q += 0.5
-        if j.get('key_achievements'):
-            q += 0.5
+        if ss and es: q += 1.0
+        if ss: q += 0.5
+        if ti_raw and ti_raw != "Not specified": q += 2.0
+        if co_raw and co_raw != "Not specified": q += 2.0
+        if j.get('description'): q += 0.5
+        if j.get('key_achievements'): q += 0.5
 
         if idur > 0:
             j["duration_years"] = idur
