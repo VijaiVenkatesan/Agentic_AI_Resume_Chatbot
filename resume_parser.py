@@ -1,14 +1,14 @@
 """
-Enhanced Resume Parser V7
+Enhanced Resume Parser V8
 - Triple extraction: Document Processor + Regex + LLM
-- Enhanced name extraction with strong/soft blacklists
+- Enhanced name extraction: 8 strategies including Regards/Declaration sections
 - Enhanced education validation + cross-validation against resume text
 - Paragraph-format work experience extraction with ALL date formats
 - Independent experience calculation — NEVER trusts LLM totals
 - Work entry validation — rejects garbage role/company names
+- Spaced-out text detection
+- PIN-prefix email cleaning
 - Accurate experience calculation using CURRENT_YEAR = 2026
-- Works for ANY domain resume, ANY format
-- NO TRUNCATION on any field
 """
 
 import json
@@ -20,9 +20,8 @@ from typing import Dict, List, Tuple, Optional, Set
 CURRENT_YEAR = 2026
 CURRENT_MONTH = 3
 
-
 # ═══════════════════════════════════════════════════════════════
-#          NAME VALIDATION BLACKLISTS
+#          BLACKLISTS & CONSTANTS
 # ═══════════════════════════════════════════════════════════════
 
 _STRONG_NAME_BLACKLIST: Set[str] = {
@@ -72,12 +71,12 @@ _SOFT_NAME_BLACKLIST: Set[str] = {
     "address", "city", "state", "country",
 }
 
-# Words that should NEVER appear as a job role or company name
 _GARBAGE_WORK_WORDS: Set[str] = {
     "in", "a", "an", "the", "at", "of", "for", "to", "and", "or",
     "with", "from", "by", "on", "is", "was", "are", "were", "be",
     "been", "being", "have", "has", "had", "do", "does", "did",
     "not", "no", "yes", "position", "role", "company",
+    "voice", "message", "routing", "optimization", "client",
 }
 
 MONTH_MAP = {
@@ -100,7 +99,6 @@ PRESENT_WORDS: Set[str] = {
     'present', 'current', 'currently', 'now', 'ongoing',
     'till date', 'till now', 'to date', 'today', 'continuing',
 }
-
 
 # ═══════════════════════════════════════════════════════════════
 #                    LLM PARSING PROMPT
@@ -220,57 +218,40 @@ def _parse_date_to_ym(date_str: str, month_map: Dict = None) -> Tuple[Optional[i
         return None, None
     if month_map is None:
         month_map = MONTH_MAP
-
     ds = date_str.strip().lower().strip('.,;:)( ')
 
-    # Present/Current
     ds_clean = re.sub(r'[^a-z\s]', '', ds).strip()
     if ds_clean in PRESENT_WORDS or any(pw in ds for pw in PRESENT_WORDS):
         return CURRENT_YEAR, CURRENT_MONTH
 
-    # "Oct'19" or "Oct'2019"
     m = re.search(r"(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*['\u2019]\s*(\d{2,4})", ds)
     if m:
-        mn = m.group(1)[:3]
         yr = int(m.group(2))
         if yr < 100:
             yr += 2000 if yr < 50 else 1900
-        return yr, month_map.get(mn, 6)
+        return yr, month_map.get(m.group(1)[:3], 6)
 
-    # "Month[,.][ ]Year"
     m = re.search(
-        r'(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|'
-        r'jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|'
-        r'oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)'
-        r'[.,]?\s*(\d{4})', ds
-    )
+        r'(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|'
+        r'aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)[.,]?\s*(\d{4})', ds)
     if m:
         return int(m.group(2)), month_map.get(m.group(1)[:3], 6)
 
-    # "MM/YYYY"
     m = re.search(r'(\d{1,2})[/\-\.](\d{4})', ds)
-    if m:
-        month = int(m.group(1))
-        if 1 <= month <= 12:
-            return int(m.group(2)), month
+    if m and 1 <= int(m.group(1)) <= 12:
+        return int(m.group(2)), int(m.group(1))
 
-    # "YYYY/MM"
     m = re.search(r'(\d{4})[/\-\.](\d{1,2})', ds)
-    if m:
-        month = int(m.group(2))
-        if 1 <= month <= 12:
-            return int(m.group(1)), month
+    if m and 1 <= int(m.group(2)) <= 12:
+        return int(m.group(1)), int(m.group(2))
 
-    # Just year
     m = re.search(r'((?:19|20)\d{2})', ds)
     if m:
         return int(m.group(1)), 6
-
     return None, None
 
 
 def _calc_duration_from_dates(start_str: str, end_str: str) -> float:
-    """Independently calculate years between two date strings."""
     sy, sm = _parse_date_to_ym(start_str)
     if not sy:
         return 0.0
@@ -280,32 +261,7 @@ def _calc_duration_from_dates(start_str: str, end_str: str) -> float:
         ey, em = _parse_date_to_ym(end_str)
         if not ey:
             ey, em = CURRENT_YEAR, CURRENT_MONTH
-    sm = sm or 6
-    em = em or 6
-    months = (ey - sy) * 12 + (em - sm)
-    return round(max(0, months / 12.0), 1)
-
-
-def _calculate_total_experience_from_dates(work_history: list) -> float:
-    """Calculate total experience ONLY from date strings, ignoring duration_years."""
-    total = 0.0
-    for job in work_history:
-        if not isinstance(job, dict):
-            continue
-        start_str = str(job.get("start_date", job.get("from", "")))
-        end_str = str(job.get("end_date", job.get("to", "")))
-        if start_str:
-            dur = _calc_duration_from_dates(start_str, end_str)
-            if dur > 0:
-                total += dur
-                continue
-        # Fallback: use duration_years only if no dates
-        dur = job.get("duration_years", job.get("years", 0))
-        try:
-            total += float(dur) if dur else 0
-        except (ValueError, TypeError):
-            pass
-    return round(total, 1)
+    return round(max(0, ((ey - sy) * 12 + ((em or 6) - (sm or 6))) / 12.0), 1)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -313,55 +269,31 @@ def _calculate_total_experience_from_dates(work_history: list) -> float:
 # ═══════════════════════════════════════════════════════════════
 
 def _is_valid_work_entry(job: Dict) -> bool:
-    """Validate that a work history entry has real role and company names."""
     if not isinstance(job, dict):
         return False
-
     title = str(job.get("title", "") or job.get("role", "") or job.get("position", "")).strip()
     company = str(job.get("company", "") or job.get("organization", "")).strip()
 
-    # Must have either a role or company
     if not title and not company:
         return False
 
-    # Check role
-    if title:
-        title_words = title.lower().split()
-        # All words are garbage → invalid
-        meaningful_title_words = [w for w in title_words if w not in _GARBAGE_WORK_WORDS and len(w) > 1]
-        if not meaningful_title_words:
+    def _check_field(val):
+        if not val:
+            return True  # empty is OK if the other field is valid
+        if len(val) < 2:
             return False
-        # Role too short (single char like "a")
-        if len(title) < 3:
+        words = val.lower().split()
+        meaningful = [w for w in words if w not in _GARBAGE_WORK_WORDS and len(w) > 1]
+        if not meaningful:
             return False
+        if val.lower().startswith(('in ', 'a ', 'an ', 'the ', 'at ', 'of ')):
+            return False
+        preps = sum(1 for w in words if w in {'in', 'a', 'an', 'the', 'at', 'of', 'for', 'to', 'with'})
+        if preps >= len(words) * 0.5 and len(words) > 2:
+            return False
+        return True
 
-    # Check company
-    if company:
-        company_words = company.lower().split()
-        meaningful_company_words = [w for w in company_words if w not in _GARBAGE_WORK_WORDS and len(w) > 1]
-        if not meaningful_company_words:
-            return False
-        if len(company) < 2:
-            return False
-
-    # Reject if role looks like a sentence fragment
-    if title:
-        # "in a position in a" → garbage
-        if title.lower().startswith(('in ', 'a ', 'an ', 'the ', 'at ', 'of ')):
-            return False
-        # Too many prepositions = probably a sentence fragment
-        preps = sum(1 for w in title.lower().split() if w in {'in', 'a', 'an', 'the', 'at', 'of', 'for', 'to', 'with'})
-        if preps >= len(title.split()) * 0.5 and len(title.split()) > 2:
-            return False
-
-    if company:
-        if company.lower().startswith(('in ', 'a ', 'an ', 'the ', 'at ', 'of ')):
-            return False
-        preps = sum(1 for w in company.lower().split() if w in {'in', 'a', 'an', 'the', 'at', 'of', 'for', 'to', 'with'})
-        if preps >= len(company.split()) * 0.5 and len(company.split()) > 2:
-            return False
-
-    return True
+    return _check_field(title) and _check_field(company)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -375,15 +307,14 @@ def _has_repetition_pattern(text: str) -> bool:
     if len(words) < 3:
         return False
     for i in range(len(words) - 1):
-        w1 = words[i].lower().strip(".,;:()")
-        w2 = words[i + 1].lower().strip(".,;:()")
+        w1, w2 = words[i].lower().strip(".,;:()"), words[i + 1].lower().strip(".,;:()")
         if w1 == w2 and len(w1) > 1:
             return True
     counts: Dict[str, int] = {}
     for w in words:
-        key = w.lower().strip(".,;:()")
-        if len(key) > 1:
-            counts[key] = counts.get(key, 0) + 1
+        k = w.lower().strip(".,;:()")
+        if len(k) > 1:
+            counts[k] = counts.get(k, 0) + 1
     return any(c >= 3 for c in counts.values())
 
 
@@ -392,11 +323,10 @@ def _has_garbage_pattern(text: str) -> bool:
         return False
     if text.count('. .') >= 2 or text.count(' . ') >= 2:
         return True
-    stripped = text.strip()
-    if stripped and stripped[0].islower():
-        first_word = stripped.split()[0] if stripped.split() else ""
-        allowed = {"in", "at", "of", "for", "the", "and", "or", "with", "to", "from"}
-        if first_word and first_word not in allowed and len(first_word) < 5:
+    s = text.strip()
+    if s and s[0].islower():
+        fw = s.split()[0] if s.split() else ""
+        if fw and fw not in {"in", "at", "of", "for", "the", "and", "or", "with", "to", "from"} and len(fw) < 5:
             return True
     for hw in ["education", "experience", "skills", "summary", "objective", "profile"]:
         if text.lower().count(hw) >= 2:
@@ -408,72 +338,63 @@ def _is_valid_education_entry(edu: Dict) -> bool:
     if not isinstance(edu, dict):
         return False
     degree = str(edu.get("degree", "")).strip()
-    field_of_study = str(
-        edu.get("field", "") or edu.get("major", "") or edu.get("branch", "") or edu.get("specialization", "")
-    ).strip()
-    institution = str(
-        edu.get("institution", "") or edu.get("university", "") or edu.get("college", "")
-    ).strip()
+    fos = str(edu.get("field", "") or edu.get("major", "") or edu.get("branch", "") or edu.get("specialization", "")).strip()
+    inst = str(edu.get("institution", "") or edu.get("university", "") or edu.get("college", "")).strip()
 
     if not degree or len(degree) < 2:
         return False
     if sum(1 for c in degree if c.isalpha()) < len(degree) * 0.5:
         return False
 
-    combined = f"{degree} {field_of_study} {institution}".lower()
-    for kw in [
-        "award", "performer", "performance", "star performer", "received", "recognition",
-        "appreciation", "good performances", "best employee", "employee of",
-        "delivered", "achievements", "achieved", "client project", "client ems",
-        "project delivery", "team lead", "team member", "responsible for",
-        "worked on", "developed", "implemented",
-    ]:
+    combined = f"{degree} {fos} {inst}".lower()
+    for kw in ["award", "performer", "performance", "star performer", "received", "recognition",
+                "appreciation", "good performances", "best employee", "employee of", "delivered",
+                "achievements", "achieved", "client project", "client ems", "project delivery",
+                "team lead", "team member", "responsible for", "worked on", "developed", "implemented"]:
         if kw in combined:
             return False
 
-    if _has_repetition_pattern(institution) or _has_repetition_pattern(field_of_study) or _has_repetition_pattern(degree):
+    if _has_repetition_pattern(inst) or _has_repetition_pattern(fos) or _has_repetition_pattern(degree):
         return False
-    if _has_garbage_pattern(institution) or _has_garbage_pattern(field_of_study):
-        return False
-
-    inst_lower = institution.lower().strip()
-    if inst_lower.count("education") >= 1 and len(inst_lower) < 30:
-        return False
-    if inst_lower in {"education", "qualifications", "academic details", "academic qualifications",
-                      "educational details", "educational qualifications", "academic background", "educational background"}:
+    if _has_garbage_pattern(inst) or _has_garbage_pattern(fos):
         return False
 
-    allowed_short = {"it", "cs", "ai", "ml", "ee", "ec", "me", "ce"}
-    if field_of_study and len(field_of_study) == 1:
+    il = inst.lower().strip()
+    if il.count("education") >= 1 and len(il) < 30:
         return False
-    if field_of_study and len(field_of_study) < 3 and field_of_study.lower() not in allowed_short:
+    if il in {"education", "qualifications", "academic details", "academic qualifications",
+              "educational details", "educational qualifications", "academic background", "educational background"}:
         return False
-    if institution and len(re.sub(r'[^a-zA-Z]', '', institution)) < 3:
+
+    ashort = {"it", "cs", "ai", "ml", "ee", "ec", "me", "ce"}
+    if fos and len(fos) == 1:
         return False
-    if institution and institution.split():
-        fw = institution.split()[0]
-        if fw and fw[0].islower() and len(fw) < 6:
-            return False
-    if field_of_study and field_of_study[0].islower() and len(field_of_study) < 5 and field_of_study.lower() not in allowed_short:
+    if fos and len(fos) < 3 and fos.lower() not in ashort:
+        return False
+    if inst and len(re.sub(r'[^a-zA-Z]', '', inst)) < 3:
+        return False
+    if inst and inst.split() and inst.split()[0][0].islower() and len(inst.split()[0]) < 6:
+        return False
+    if fos and fos[0].islower() and len(fos) < 5 and fos.lower() not in ashort:
         return False
 
     if degree.lower().strip('.') in {"ma", "me", "ms", "ba", "be", "bs"}:
-        school_kw = ["university", "college", "institute", "school", "academy", "polytechnic",
-                     "iit", "nit", "iiit", "bits", "vit", "mit", "anna", "delhi", "mumbai", "vidyalaya", "vidyapeeth"]
-        if institution:
-            if not any(kw in inst_lower for kw in school_kw):
+        skw = ["university", "college", "institute", "school", "academy", "polytechnic",
+               "iit", "nit", "iiit", "bits", "vit", "mit", "anna", "delhi", "mumbai", "vidyalaya", "vidyapeeth"]
+        if inst:
+            if not any(k in il for k in skw):
                 return False
         else:
             return False
 
-    company_ind = ["mahindra", "infosys", "wipro", "tcs", "cognizant", "accenture", "capgemini", "hcl",
-                   "tech mahindra", "client", "pvt", "ltd", "inc", "llc", "corp", "solutions",
-                   "technologies", "services", "consulting", "private limited", "limited", "software"]
-    if institution:
-        school_kw2 = ["university", "college", "institute", "school", "academy", "polytechnic"]
-        if any(kw in inst_lower for kw in company_ind) and not any(kw in inst_lower for kw in school_kw2):
+    ci = ["mahindra", "infosys", "wipro", "tcs", "cognizant", "accenture", "capgemini", "hcl",
+          "tech mahindra", "client", "pvt", "ltd", "inc", "llc", "corp", "solutions",
+          "technologies", "services", "consulting", "private limited", "limited", "software"]
+    if inst:
+        skw2 = ["university", "college", "institute", "school", "academy", "polytechnic"]
+        if any(k in il for k in ci) and not any(k in il for k in skw2):
             return False
-    if institution and len(institution) > 150:
+    if inst and len(inst) > 150:
         return False
     return True
 
@@ -483,8 +404,8 @@ def _normalize_degree_key(degree: str) -> str:
         return ""
     d = re.sub(r'[^a-z0-9\s]', '', degree.lower().strip())
     d = re.sub(r'\s+', '', d)
-    d_no_pg = re.sub(r'^pg\.?\s*', '', degree.lower().strip())
-    d_no_pg = re.sub(r'[^a-z0-9]', '', d_no_pg)
+    dnp = re.sub(r'^pg\.?\s*', '', degree.lower().strip())
+    dnp = re.sub(r'[^a-z0-9]', '', dnp)
 
     norms = {
         r'^(?:bacheloroftechnology|btech|be|pgbe|pgbtech)$': 'btech',
@@ -503,71 +424,65 @@ def _normalize_degree_key(degree: str) -> str:
     for p, r in norms.items():
         if re.match(p, d):
             return r
-    if d_no_pg != d:
+    if dnp != d:
         for p, r in norms.items():
-            if re.match(p, d_no_pg):
+            if re.match(p, dnp):
                 return r
     return d
 
 
-def _deduplicate_education_entries(edu_list: List[Dict]) -> List[Dict]:
-    if not edu_list:
+def _deduplicate_education_entries(el: List[Dict]) -> List[Dict]:
+    if not el:
         return []
     groups: Dict[str, List[Dict]] = {}
-    for edu in edu_list:
-        if not isinstance(edu, dict):
+    for e in el:
+        if not isinstance(e, dict):
             continue
-        deg = str(edu.get("degree", "")).strip()
-        if not deg:
+        dg = str(e.get("degree", "")).strip()
+        if not dg:
             continue
-        key = _normalize_degree_key(deg) or re.sub(r'[^a-z0-9]', '', deg.lower())
-        groups.setdefault(key, []).append(edu)
+        k = _normalize_degree_key(dg) or re.sub(r'[^a-z0-9]', '', dg.lower())
+        groups.setdefault(k, []).append(e)
 
     result: List[Dict] = []
     for entries in groups.values():
         if len(entries) == 1:
             result.append(entries[0])
         else:
-            best, best_score = entries[0], -999
+            best, bs = entries[0], -999
             for e in entries:
                 s = 0
-                inst = str(e.get("institution", "") or e.get("university", "") or e.get("college", "")).strip()
-                fv = str(e.get("field", "") or e.get("major", "") or e.get("branch", "")).strip()
-                if inst and len(inst) > 5: s += 3
-                if fv and len(fv) > 2: s += 2
+                i2 = str(e.get("institution", "") or e.get("university", "") or e.get("college", "")).strip()
+                f2 = str(e.get("field", "") or e.get("major", "") or e.get("branch", "")).strip()
+                if i2 and len(i2) > 5: s += 3
+                if f2 and len(f2) > 2: s += 2
                 if e.get("year") or e.get("end_year") or e.get("graduation_year"): s += 2
                 if e.get("gpa") or e.get("cgpa") or e.get("grade"): s += 1
                 if e.get("location"): s += 1
-                if _has_garbage_pattern(inst): s -= 5
-                if _has_repetition_pattern(inst): s -= 5
-                if s > best_score:
-                    best_score = s
+                if _has_garbage_pattern(i2): s -= 5
+                if _has_repetition_pattern(i2): s -= 5
+                if s > bs:
+                    bs = s
                     best = e
             result.append(best)
     return result
 
 
-def _filter_valid_education(edu_list: list) -> list:
-    if not edu_list or not isinstance(edu_list, list):
+def _filter_valid_education(el: list) -> list:
+    if not el or not isinstance(el, list):
         return []
-    valid = [e for e in edu_list if isinstance(e, dict) and _is_valid_education_entry(e)]
-    return _deduplicate_education_entries(valid)
+    return _deduplicate_education_entries([e for e in el if isinstance(e, dict) and _is_valid_education_entry(e)])
 
 
-def _validate_education_against_text(edu_list: List[Dict], resume_text: str) -> List[Dict]:
-    if not edu_list or not resume_text:
-        return edu_list
-
-    text_lower = resume_text.lower()
-    text_alpha = re.sub(r'[^a-z0-9\s]', '', text_lower)
-    validated: List[Dict] = []
-
+def _validate_education_against_text(el: List[Dict], resume_text: str) -> List[Dict]:
+    if not el or not resume_text:
+        return el
+    tl = resume_text.lower()
+    ta = re.sub(r'[^a-z0-9\s]', '', tl)
+    validated = []
     ignore = {'the', 'and', 'for', 'from', 'of', 'in', 'at', 'to', 'with'}
-    generic = {'university', 'college', 'institute', 'school', 'academy',
-               'degree', 'bachelor', 'master', 'doctor', 'diploma',
-               'science', 'arts', 'technology', 'engineering'}
-
-    deg_abbrs = {
+    generic = {'university', 'college', 'institute', 'school', 'academy', 'degree', 'bachelor', 'master', 'doctor', 'diploma', 'science', 'arts', 'technology', 'engineering'}
+    dabbrs = {
         'bachelor of technology': ['b.tech', 'btech', 'b tech'],
         'master of technology': ['m.tech', 'mtech', 'm tech'],
         'bachelor of engineering': ['b.e', 'b.e.', 'be', 'pg. b.e', 'pg b.e', 'pg.b.e'],
@@ -583,71 +498,65 @@ def _validate_education_against_text(edu_list: List[Dict], resume_text: str) -> 
         'doctor of philosophy': ['phd', 'ph.d', 'ph.d.'],
     }
 
-    for edu in edu_list:
+    for edu in el:
         if not isinstance(edu, dict):
             continue
         degree = str(edu.get("degree", "")).strip()
-        field_val = str(edu.get("field", "") or edu.get("major", "") or edu.get("branch", "") or edu.get("specialization", "")).strip()
-        institution = str(edu.get("institution", "") or edu.get("university", "") or edu.get("college", "")).strip()
-
+        fv = str(edu.get("field", "") or edu.get("major", "") or edu.get("branch", "") or edu.get("specialization", "")).strip()
+        inst = str(edu.get("institution", "") or edu.get("university", "") or edu.get("college", "")).strip()
         found = False
 
-        # Check institution
-        if institution and len(institution) > 3:
-            iw = [w for w in institution.lower().split() if w not in ignore and w not in generic]
+        if inst and len(inst) > 3:
+            iw = [w for w in inst.lower().split() if w not in ignore and w not in generic]
             if iw:
-                if any(w in text_lower for w in iw if len(w) > 2):
+                if any(w in tl for w in iw if len(w) > 2):
                     found = True
                 if not found:
                     iwa = [re.sub(r'[^a-z0-9]', '', w) for w in iw]
-                    if any(w in text_alpha for w in iwa if len(w) > 2):
+                    if any(w in ta for w in iwa if len(w) > 2):
                         found = True
             else:
-                ia = re.sub(r'[^a-z0-9\s]', '', institution.lower()).strip()
-                if ia and ia in text_alpha:
+                ia = re.sub(r'[^a-z0-9\s]', '', inst.lower()).strip()
+                if ia and ia in ta:
                     found = True
 
-        # Check degree
         if not found and degree and len(degree) > 1:
             dl = degree.lower()
             da = re.sub(r'[^a-z0-9\s]', '', dl)
-            if dl in text_lower or da in text_alpha:
+            if dl in tl or da in ta:
                 found = True
             if not found:
-                for ff, abbrs in deg_abbrs.items():
+                for ff, abbrs in dabbrs.items():
                     if ff in dl or dl in ff:
-                        if any(a in text_lower for a in abbrs):
+                        if any(a in tl for a in abbrs):
                             found = True
                             break
             if not found:
                 dw = [w for w in dl.split() if len(w) > 1 and w not in ignore and w not in generic]
-                if dw and sum(1 for w in dw if w in text_lower) >= 1:
+                if dw and sum(1 for w in dw if w in tl) >= 1:
                     found = True
             if not found:
                 am = re.search(r'(?:PG\.?\s*)?(B\.?E\.?|B\.?Tech|M\.?Tech|MBA|BCA|MCA|B\.?Sc|M\.?Sc|Ph\.?D)', degree, re.IGNORECASE)
                 if am:
                     ab = am.group(0).lower()
-                    if ab in text_lower or ab.replace('.', '') in text_alpha:
+                    if ab in tl or ab.replace('.', '') in ta:
                         found = True
 
-        # Check field
-        if not found and field_val and len(field_val) > 3:
-            if field_val.lower() in text_lower:
+        if not found and fv and len(fv) > 3:
+            if fv.lower() in tl:
                 found = True
             else:
-                fw = [w for w in field_val.lower().split() if len(w) > 3 and w not in ignore and w not in generic]
-                if fw and any(w in text_lower for w in fw):
+                fw = [w for w in fv.lower().split() if len(w) > 3 and w not in ignore and w not in generic]
+                if fw and any(w in tl for w in fw):
                     found = True
-
         if found:
             validated.append(edu)
 
-    # Safety
-    if not validated and edu_list:
-        indicators = ['b.e', 'b.tech', 'btech', 'm.tech', 'mtech', 'b.sc', 'm.sc', 'bca', 'mca', 'mba', 'phd',
-                      'bachelor', 'master', 'diploma', 'degree', 'university', 'college', 'education', 'graduated', 'pg.', 'pg ', 'engineering']
-        if any(ind in text_lower for ind in indicators):
-            return edu_list
+    if not validated and el:
+        inds = ['b.e', 'b.tech', 'btech', 'm.tech', 'mtech', 'b.sc', 'm.sc', 'bca', 'mca', 'mba', 'phd',
+                'bachelor', 'master', 'diploma', 'degree', 'university', 'college', 'education', 'graduated', 'pg.', 'pg ', 'engineering']
+        if any(i in tl for i in inds):
+            return el
     return validated
 
 
@@ -656,186 +565,103 @@ def _validate_education_against_text(edu_list: List[Dict], resume_text: str) -> 
 # ═══════════════════════════════════════════════════════════════
 
 def _extract_contacts_regex(text: str) -> Dict:
-    contacts: Dict[str, str] = {
-        "email": "", "phone": "", "address": "",
-        "linkedin": "", "github": "", "portfolio": "", "location": ""
-    }
+    contacts: Dict[str, str] = {"email": "", "phone": "", "address": "", "linkedin": "", "github": "", "portfolio": "", "location": ""}
     if not text:
         return contacts
 
-    # ═══════ EMAIL ═══════
-    email_patterns = [
-        r'[\w._%+-]+@[\w.-]+\.[a-zA-Z]{2,}',
-        r'[\w._%+-]+\s*@\s*[\w.-]+\s*\.\s*[a-zA-Z]{2,}',
-        r'[\w._%+-]+\s*\[\s*at\s*\]\s*[\w.-]+\s*\.\s*[a-zA-Z]{2,}',
-        r'[\w._%+-]+\s*\(\s*at\s*\)\s*[\w.-]+\s*\.\s*[a-zA-Z]{2,}',
-        r'(?:email|e-mail|mail)[\s.:]*[\w._%+-]+@[\w.-]+\.[a-zA-Z]{2,}',
-    ]
-    for p in email_patterns:
+    # EMAIL
+    for p in [r'[\w._%+-]+@[\w.-]+\.[a-zA-Z]{2,}', r'[\w._%+-]+\s*@\s*[\w.-]+\s*\.\s*[a-zA-Z]{2,}',
+              r'[\w._%+-]+\s*\[\s*at\s*\]\s*[\w.-]+\s*\.\s*[a-zA-Z]{2,}',
+              r'[\w._%+-]+\s*\(\s*at\s*\)\s*[\w.-]+\s*\.\s*[a-zA-Z]{2,}',
+              r'(?:email|e-mail|mail)[\s.:]*[\w._%+-]+@[\w.-]+\.[a-zA-Z]{2,}']:
         m = re.search(p, text, re.IGNORECASE)
         if m:
-            email = m.group(0).strip()
-            # Remove label prefix
-            email = re.sub(r'^(?:email|e-mail|mail)[\s.:]*', '', email, flags=re.IGNORECASE)
-            # Remove spaces
+            email = re.sub(r'^(?:email|e-mail|mail)[\s.:]*', '', m.group(0), flags=re.IGNORECASE)
             email = re.sub(r'\s+', '', email)
-            # Fix [at] / (at)
             email = re.sub(r'\[\s*at\s*\]|\(\s*at\s*\)', '@', email, flags=re.IGNORECASE)
-
-            # Fix: remove leading PIN/ZIP codes that get merged with email
-            # e.g. "411046.sanketrg1997@gmail.com" → "sanketrg1997@gmail.com"
             if '@' in email:
-                local_part = email.split('@')[0]
-                pin_match = re.match(r'^(\d{4,7})[.\-_]', local_part)
-                if pin_match:
-                    email = email[len(pin_match.group(1)) + 1:]
-
-                # Also handle: "411046sanketrg1997@gmail.com" (no separator)
-                # If local part starts with 5-6 digits followed by letters
-                if not pin_match:
-                    local_part = email.split('@')[0]
-                    digit_prefix = re.match(r'^(\d{5,7})([a-zA-Z])', local_part)
-                    if digit_prefix:
-                        email = local_part[len(digit_prefix.group(1)):] + '@' + email.split('@')[1]
-
-            # Final validation
+                lp = email.split('@')[0]
+                pm = re.match(r'^(\d{4,7})[.\-_]', lp)
+                if pm:
+                    email = email[len(pm.group(1)) + 1:]
+                if not pm:
+                    dp = re.match(r'^(\d{5,7})([a-zA-Z])', lp)
+                    if dp:
+                        email = lp[len(dp.group(1)):] + '@' + email.split('@')[1]
             if '@' in email and '.' in email.split('@')[-1]:
-                final_local = email.split('@')[0]
-                # Local part must have at least one letter
-                if any(c.isalpha() for c in final_local):
-                    # Reject if local part is too short (single char)
-                    if len(final_local) >= 2:
-                        contacts["email"] = email
-                        break
+                fl = email.split('@')[0]
+                if any(c.isalpha() for c in fl) and len(fl) >= 2:
+                    contacts["email"] = email
+                    break
 
-    # ═══════ PHONE ═══════
-    phone_patterns = [
-        r'\+\d{1,3}[-.\s]?\(?\d{2,5}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}',
-        r'\+\d{1,3}[-.\s]?\d{4,5}[-.\s]?\d{5,6}',
-        r'\+\d{10,15}',
-        r'\+91[-.\s]?\d{5}[-.\s]?\d{5}',
-        r'\+91[-.\s]?\d{10}',
-        r'(?<!\d)91[-.\s]?\d{10}(?!\d)',
-        r'(?<!\d)0\d{2,4}[-.\s]?\d{6,8}(?!\d)',
-        r'\(\d{3}\)\s*\d{3}[-.\s]?\d{4}',
-        r'(?<!\d)\d{3}[-.\s]\d{3}[-.\s]\d{4}(?!\d)',
-        r'(?<!\d)1[-.\s]?\d{3}[-.\s]?\d{3}[-.\s]?\d{4}(?!\d)',
-        r'\+44[-.\s]?\d{4}[-.\s]?\d{6}',
-        r'(?<!\d)0\d{4}[-.\s]?\d{6}(?!\d)',
-        r'(?:Phone|Ph|Tel|Mobile|Cell|Contact|M|T|P|Call)[\s.:]*[\+]?[\d][\d\s\-().]{8,18}',
-        r'(?<!\d)\d{3}[-.\s]?\d{3}[-.\s]?\d{4}(?!\d)',
-        r'(?<!\d)\d{5}[-.\s]?\d{5}(?!\d)',
-        r'(?<!\d)\d{10}(?!\d)',
-    ]
-    for p in phone_patterns:
+    # PHONE
+    for p in [r'\+\d{1,3}[-.\s]?\(?\d{2,5}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}', r'\+\d{10,15}',
+              r'\+91[-.\s]?\d{5}[-.\s]?\d{5}', r'\+91[-.\s]?\d{10}',
+              r'(?<!\d)91[-.\s]?\d{10}(?!\d)', r'\(\d{3}\)\s*\d{3}[-.\s]?\d{4}',
+              r'(?<!\d)\d{3}[-.\s]\d{3}[-.\s]\d{4}(?!\d)',
+              r'(?:Phone|Ph|Tel|Mobile|Cell|Contact|M|T|P|Call)[\s.:]*[\+]?[\d][\d\s\-().]{8,18}',
+              r'(?<!\d)\d{5}[-.\s]?\d{5}(?!\d)', r'(?<!\d)\d{10}(?!\d)']:
         try:
             for match in re.findall(p, text, re.IGNORECASE):
-                cleaned = re.sub(
-                    r'^(?:Phone|Ph|Tel|Mobile|Cell|Contact|M|T|P|Call)[\s.:]*',
-                    '', match, flags=re.IGNORECASE
-                ).strip()
-                digits = re.sub(r'[^\d]', '', cleaned)
-                if 10 <= len(digits) <= 15:
-                    contacts["phone"] = cleaned
+                cl = re.sub(r'^(?:Phone|Ph|Tel|Mobile|Cell|Contact|M|T|P|Call)[\s.:]*', '', match, flags=re.IGNORECASE).strip()
+                if 10 <= len(re.sub(r'[^\d]', '', cl)) <= 15:
+                    contacts["phone"] = cl
                     break
             if contacts["phone"]:
                 break
         except re.error:
             continue
 
-    # ═══════ LINKEDIN ═══════
-    for p in [
-        r'(?:https?://)?(?:www\.)?linkedin\.com/in/[\w-]+/?',
-        r'linkedin\.com/in/[\w-]+',
-    ]:
+    # LINKEDIN
+    for p in [r'(?:https?://)?(?:www\.)?linkedin\.com/in/[\w-]+/?', r'linkedin\.com/in/[\w-]+']:
         m = re.search(p, text, re.IGNORECASE)
         if m:
             contacts["linkedin"] = m.group(0).strip()
             break
 
-    # ═══════ GITHUB ═══════
-    for p in [
-        r'(?:https?://)?(?:www\.)?github\.com/[\w-]+/?',
-        r'github\.com/[\w-]+',
-    ]:
+    # GITHUB
+    for p in [r'(?:https?://)?(?:www\.)?github\.com/[\w-]+/?', r'github\.com/[\w-]+']:
         m = re.search(p, text, re.IGNORECASE)
         if m:
             contacts["github"] = m.group(0).strip()
             break
 
-    # ═══════ PORTFOLIO ═══════
-    portfolio_patterns = [
-        r'(?:portfolio|website|web|site|blog)[\s.:]+(?:https?://)?[\w.-]+\.[a-z]{2,}[\w/.-]*',
-        r'(?:https?://)?(?:www\.)?[\w-]+\.(?:dev|io|me|tech|design|codes?|site|online|app)/?[\w/.-]*',
-    ]
-    for p in portfolio_patterns:
+    # PORTFOLIO
+    for p in [r'(?:portfolio|website|web|site|blog)[\s.:]+(?:https?://)?[\w.-]+\.[a-z]{2,}[\w/.-]*',
+              r'(?:https?://)?(?:www\.)?[\w-]+\.(?:dev|io|me|tech|design|codes?|site|online|app)/?[\w/.-]*']:
         for match in re.findall(p, text, re.IGNORECASE):
-            url = re.sub(
-                r'^(?:portfolio|website|web|site|blog)[\s.:]+',
-                '', match, flags=re.IGNORECASE
-            ).strip()
-            # Skip linkedin, github, and email-like patterns
-            url_lower = url.lower()
-            if ('linkedin' not in url_lower
-                    and 'github' not in url_lower
-                    and '@' not in url
-                    and 'ibm.com' not in url_lower  # Skip employer URLs in header
-                    ):
+            url = re.sub(r'^(?:portfolio|website|web|site|blog)[\s.:]+', '', match, flags=re.IGNORECASE).strip()
+            ul = url.lower()
+            if 'linkedin' not in ul and 'github' not in ul and '@' not in url and 'ibm.com' not in ul:
                 contacts["portfolio"] = url
                 break
         if contacts["portfolio"]:
             break
 
-    # ═══════ ADDRESS ═══════
-    address_patterns = [
-        # Labeled address
-        r'(?:Address|Location|Residence|Home|Addr)[\s.:]+([^\n]{15,150})',
-        # With PIN/ZIP codes
-        r'(?:No[.:]?\s*)?[\d]+[,\s]+[\w\s]+(?:Street|St|Road|Rd|Avenue|Ave|Nagar|Colony|'
-        r'Layout|Block|Lane|Apt|Apartment|Floor|Fl|Building|Bldg|Society|Housing)[\w\s,.-]+(?:\d{5,6})',
-        # City, State, PIN pattern
-        r'[\w\s]+,\s*[\w\s]+,\s*[\w\s]+-?\s*\d{5,6}',
-        # Housing society patterns (common in Indian addresses)
-        r'[\'"\u2018\u2019]?[\w\s]+(?:Society|Housing|Apartment|Complex|Residency)[\w\s,.-]+\d{5,6}',
-    ]
-    for p in address_patterns:
+    # ADDRESS
+    for p in [r'(?:Address|Location|Residence|Home|Addr)[\s.:]+([^\n]{15,150})',
+              r'(?:No[.:]?\s*)?[\d]+[,\s]+[\w\s]+(?:Street|St|Road|Rd|Avenue|Ave|Nagar|Colony|Layout|Block|Lane|Apt|Apartment|Floor|Fl|Building|Bldg|Society|Housing)[\w\s,.-]+(?:\d{5,6})',
+              r'[\w\s]+,\s*[\w\s]+,\s*[\w\s]+-?\s*\d{5,6}',
+              r'[\'"\u2018\u2019]?[\w\s]+(?:Society|Housing|Apartment|Complex|Residency)[\w\s,.-]+\d{5,6}']:
         m = re.search(p, text, re.IGNORECASE)
         if m:
             addr = (m.group(1) if m.lastindex else m.group(0)).strip()
-            addr = re.sub(
-                r'^(?:Address|Location|Residence|Home|Addr)[\s.:]+',
-                '', addr, flags=re.IGNORECASE
-            ).strip()
-            # Clean leading quotes/apostrophes
+            addr = re.sub(r'^(?:Address|Location|Residence|Home|Addr)[\s.:]+', '', addr, flags=re.IGNORECASE).strip()
             addr = addr.lstrip("'\"\u2018\u2019")
             if 15 < len(addr) < 200:
                 contacts["address"] = addr
                 break
 
-    # ═══════ LOCATION ═══════
-    location_patterns = [
-        r'(?:Location|Based in|Located at|City|Current Location)[\s.:]+([A-Za-z][A-Za-z\s,]+)',
-        r'\b(Bangalore|Bengaluru|Mumbai|Delhi|NCR|Chennai|Hyderabad|Pune|Kolkata|'
-        r'Noida|Gurgaon|Gurugram|Ahmedabad|Jaipur|Lucknow|Chandigarh|Indore|Bhopal|'
-        r'Kochi|Coimbatore|Trivandrum|Mysore|Nagpur|Surat|Vadodara|Bhubaneswar|'
-        r'Patna|Ranchi|Guwahati|Visakhapatnam|Vijayawada|Kolhapur)\b',
-        r'\b(New York|NYC|San Francisco|SF|Los Angeles|LA|Chicago|Seattle|Boston|'
-        r'Austin|Denver|Atlanta|Dallas|Houston|Phoenix|San Diego|San Jose|Portland|'
-        r'Miami|Washington DC|Philadelphia)\b',
-        r'\b(London|Berlin|Amsterdam|Dublin|Singapore|Tokyo|Sydney|Toronto|'
-        r'Vancouver|Melbourne|Paris|Munich|Barcelona|Stockholm|Copenhagen|'
-        r'Zurich|Dubai|Hong Kong)\b',
-        r'\b(India|USA|US|United States|UK|United Kingdom|Canada|Australia|'
-        r'Germany|Netherlands|Singapore|UAE)\b',
-    ]
-    for p in location_patterns:
+    # LOCATION
+    for p in [r'(?:Location|Based in|Located at|City|Current Location)[\s.:]+([A-Za-z][A-Za-z\s,]+)',
+              r'\b(Bangalore|Bengaluru|Mumbai|Delhi|NCR|Chennai|Hyderabad|Pune|Kolkata|Noida|Gurgaon|Gurugram|Ahmedabad|Jaipur|Lucknow|Chandigarh|Indore|Bhopal|Kochi|Coimbatore|Trivandrum|Mysore|Nagpur|Kolhapur)\b',
+              r'\b(New York|NYC|San Francisco|SF|Los Angeles|LA|Chicago|Seattle|Boston|Austin|Denver|Atlanta)\b',
+              r'\b(London|Berlin|Amsterdam|Dublin|Singapore|Tokyo|Sydney|Toronto|Vancouver|Melbourne)\b',
+              r'\b(India|USA|US|United States|UK|United Kingdom|Canada|Australia|Germany|Netherlands|Singapore|UAE)\b']:
         m = re.search(p, text, re.IGNORECASE)
         if m:
             loc = (m.group(1) if m.lastindex else m.group(0)).strip()
-            loc = re.sub(
-                r'^(?:Location|Based in|Located at|City|Current Location)[\s.:]+',
-                '', loc, flags=re.IGNORECASE
-            ).strip()
+            loc = re.sub(r'^(?:Location|Based in|Located at|City|Current Location)[\s.:]+', '', loc, flags=re.IGNORECASE).strip()
             if 2 <= len(loc) <= 100:
                 contacts["location"] = loc
                 break
@@ -844,8 +670,17 @@ def _extract_contacts_regex(text: str) -> Dict:
 
 
 # ═══════════════════════════════════════════════════════════════
-#                    NAME EXTRACTION
+#                    NAME EXTRACTION — 8 STRATEGIES
 # ═══════════════════════════════════════════════════════════════
+
+def _is_spaced_out_text(line: str) -> bool:
+    if not line or len(line) < 5:
+        return False
+    parts = [p for p in line.split(' ') if p]
+    if len(parts) < 3:
+        return False
+    return sum(1 for p in parts if len(p) == 1) / len(parts) > 0.5
+
 
 def _extract_name_from_text(text: str) -> str:
     if not text:
@@ -857,14 +692,37 @@ def _extract_name_from_text(text: str) -> str:
             'professional', 'career', 'about', 'personal', 'details', 'information',
             'confidential', 'page', 'date', 'application', 'position', 'job',
             'candidate', 'recruitment', 'hiring', 'vacancy', 'declaration', 'reference',
-            'signature', 'company', 'corporation', 'limited', 'pvt', 'ltd']
+            'signature', 'company', 'corporation', 'limited', 'pvt', 'ltd',
+            'more', 'voice', 'message', 'routing', 'optimization']
 
+    # Strategy 1: Labeled name
     for p in [r'(?:Name|Full Name|Candidate Name|Applicant Name)[\s.:]+([A-Z][a-zA-Z]+(?:\s+[A-Z]\.?\s*)?(?:\s+[A-Z][a-zA-Z]+){1,2})',
               r'(?:Name|Full Name)[\s.:]+([A-Z][A-Z\s]+)']:
         m = re.search(p, text, re.IGNORECASE)
         if m and _is_valid_name(m.group(1).strip()):
             return _clean_name(m.group(1).strip())
 
+    # Strategy 1.5: ALL-CAPS multi-word name in first 20 lines
+    for line in lines[:20]:
+        line = line.strip()
+        if not line or len(line) < 5 or len(line) > 50:
+            continue
+        if any(kw in line.lower() for kw in skip):
+            continue
+        if '@' in line or 'http' in line.lower():
+            continue
+        if re.match(r'^\d', line) or len(re.findall(r'\d', line)) >= 3:
+            continue
+        if _is_spaced_out_text(line):
+            continue
+        if line.isupper() or (line == line.upper() and ' ' in line):
+            words = line.split()
+            if 2 <= len(words) <= 4 and all(len(w) >= 2 and w.isalpha() for w in words):
+                tn = line.title()
+                if _is_valid_name(tn):
+                    return _clean_name(tn)
+
+    # Strategy 2: First line that looks like a name
     for line in lines[:15]:
         line = line.strip()
         if not line or len(line) < 4 or len(line) > 45:
@@ -874,6 +732,8 @@ def _extract_name_from_text(text: str) -> str:
         if re.match(r'^\d', line) or len(re.findall(r'\d', line)) >= 5:
             continue
         if re.match(r'^[\+\d\(\)]', line) or '@' in line or 'http' in line.lower():
+            continue
+        if _is_spaced_out_text(line):
             continue
         if sum(1 for c in line if c.isalpha() or c.isspace() or c in '.-') / max(len(line), 1) < 0.85:
             continue
@@ -888,16 +748,19 @@ def _extract_name_from_text(text: str) -> str:
             if _is_valid_name(line):
                 return _clean_name(line)
 
+    # Strategy 3: First line mixed content
     if lines:
         m = re.match(r'^([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?(?:\s+[A-Z][a-z]+){1,2})', lines[0].strip())
         if m and _is_valid_name(m.group(1).strip()):
             return _clean_name(m.group(1).strip())
 
+    # Strategy 4: "I am" / "My name is"
     for p in [r"(?:I am|I'm|My name is|This is|Myself)\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?(?:\s+[A-Z][a-z]+){1,2})"]:
         m = re.search(p, text, re.IGNORECASE)
         if m and _is_valid_name(m.group(1).strip()):
             return _clean_name(m.group(1).strip())
 
+    # Strategy 5: From email
     em = re.search(r'([\w.]+)@', text)
     if em:
         parts = re.split(r'[._]', em.group(1))
@@ -906,10 +769,12 @@ def _extract_name_from_text(text: str) -> str:
             if len(pn.split()) >= 2:
                 return pn
 
+    # Strategy 6: ALL CAPS line (first 10 lines)
     headers = {'RESUME', 'CURRICULUM', 'VITAE', 'CV', 'OBJECTIVE', 'SUMMARY', 'EXPERIENCE', 'EDUCATION',
                'SKILLS', 'CONTACT', 'PROFILE', 'ABOUT', 'PROJECTS', 'CERTIFICATIONS', 'ACHIEVEMENTS',
                'AWARDS', 'REFERENCES', 'DECLARATION', 'PERSONAL', 'PROFESSIONAL', 'TECHNICAL', 'WORK',
-               'HISTORY', 'QUALIFICATIONS', 'RESPONSIBILITIES', 'DETAILS', 'INFORMATION', 'OVERVIEW'}
+               'HISTORY', 'QUALIFICATIONS', 'RESPONSIBILITIES', 'DETAILS', 'INFORMATION', 'OVERVIEW',
+               'MORE ABOUT ME', 'AWARDS & ACHIEVEMENT', 'WORK EXPERIENCE', 'TECHNICAL SKILLS'}
     for line in lines[:10]:
         line = line.strip()
         if line and line.isupper() and 5 <= len(line) <= 40:
@@ -918,6 +783,23 @@ def _extract_name_from_text(text: str) -> str:
                 tn = line.title()
                 if _is_valid_name(tn):
                     return tn
+
+    # Strategy 7: Name after "Regards" / "Sincerely" at end of resume
+    for p in [r'(?:Regards|Sincerely|Yours\s+(?:truly|faithfully|sincerely)|'
+              r'Thank\s*(?:you|s)|Best\s+regards|Kind\s+regards|Warm\s+regards|'
+              r'Respectfully|Cordially)\s*[,.]?\s*\n\s*'
+              r'([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){1,3})']:
+        m = re.search(p, text, re.IGNORECASE)
+        if m and _is_valid_name(m.group(1).strip()):
+            return _clean_name(m.group(1).strip())
+
+    # Strategy 8: Name after "Declaration" section
+    for p in [r'(?:Declaration|I\s+hereby\s+declare).+?(?:Date|Location|Place|Regards)\s*[:\s]*\w*\s*\n\s*'
+              r'([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){1,3})\s*$']:
+        m = re.search(p, text, re.IGNORECASE | re.DOTALL)
+        if m and _is_valid_name(m.group(1).strip()):
+            return _clean_name(m.group(1).strip())
+
     return ""
 
 
@@ -928,7 +810,8 @@ def _is_valid_name(name: str) -> bool:
     nl = nc.lower()
     if nl in {"", "n/a", "na", "none", "unknown", "candidate", "your name", "first last",
               "firstname lastname", "name", "full name", "[name]", "<name>", "(name)",
-              "enter name", "type name", "not available", "curriculum vitae", "resume", "cv"}:
+              "enter name", "type name", "not available", "curriculum vitae", "resume", "cv",
+              "more about me", "about me"}:
         return False
     words = nc.split()
     if not (2 <= len(words) <= 4):
@@ -965,106 +848,91 @@ def _clean_name(name: str) -> str:
 def _extract_work_experience_from_text(text: str) -> List[Dict]:
     if not text:
         return []
-
     work_entries: List[Dict] = []
     seen_jobs: Set[str] = set()
 
-    MONTH_YEAR = (r'(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|'
-                  r'Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)[.,]?\s*\d{4}')
-    NUMERIC_DATE = r'\d{1,2}[/\-\.]\d{4}'
-    NUMERIC_DATE_REV = r'\d{4}[/\-\.]\d{1,2}'
-    MONTH_APOS = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)['\u2019]\s*\d{2,4}"
-    PRESENT_KW = r'(?:present|current(?:ly)?|now|ongoing|till\s*date|till\s*now|to\s*date|today|continuing)'
-    JUST_YEAR = r'\d{4}'
-    ANY_DATE = f'(?:{MONTH_YEAR}|{NUMERIC_DATE}|{NUMERIC_DATE_REV}|{MONTH_APOS}|{PRESENT_KW}|{JUST_YEAR})'
-    DATE_SEP = r'\s*(?:to|till|until|[-\u2013\u2014])\s*'
+    MY = (r'(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|'
+          r'Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)[.,]?\s*\d{4}')
+    ND = r'\d{1,2}[/\-\.]\d{4}'
+    NDR = r'\d{4}[/\-\.]\d{1,2}'
+    MA = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)['\u2019]\s*\d{2,4}"
+    PK = r'(?:present|current(?:ly)?|now|ongoing|till\s*date|till\s*now|to\s*date|today|continuing)'
+    JY = r'\d{4}'
+    AD = f'(?:{MY}|{ND}|{NDR}|{MA}|{PK}|{JY})'
+    DS = r'\s*(?:to|till|until|[-\u2013\u2014])\s*'
 
-    def _clean_co(c):
+    def _cco(c):
         c = re.sub(r'https?://\S+', '', c).strip()
         c = re.sub(r'[,;]\s*\w+$', '', c)
         return c.rstrip('-,. ;:')
 
-    def _norm_key(r, c):
-        rn = re.sub(r'[^a-z0-9]', '', r.lower())[:25]
-        cn = re.sub(r'[^a-z0-9]', '', c.lower())[:25]
-        return f"{rn}_{cn}"
+    def _nk(r, c):
+        return f"{re.sub(r'[^a-z0-9]', '', r.lower())[:25]}_{re.sub(r'[^a-z0-9]', '', c.lower())[:25]}"
 
     def _add(role, company, start, end, loc=""):
         role = role.strip().rstrip(',. ')
-        company = _clean_co(company)
+        company = _cco(company)
         end = re.sub(r'https?://\S+', '', end).strip().rstrip('.,;: ')
-
-        # Validate before adding
-        test_entry = {"title": role, "company": company}
-        if not _is_valid_work_entry(test_entry):
+        if not _is_valid_work_entry({"title": role, "company": company}):
             return
-
-        key = _norm_key(role, company)
+        key = _nk(role, company)
         if key in seen_jobs:
             return
         seen_jobs.add(key)
-
         dur = _calc_duration_from_dates(start, end)
-        clean_end = end.strip() if end.strip() and end.strip().lower() not in ['', '-', '\u2013', '\u2014'] else "Present"
-
-        work_entries.append({
-            "title": role, "company": company, "location": loc,
-            "start_date": start.strip(), "end_date": clean_end,
-            "duration_years": dur, "type": "Full-time",
-            "description": "", "key_achievements": [], "technologies_used": []
-        })
+        ce = end.strip() if end.strip() and end.strip().lower() not in ['', '-', '\u2013', '\u2014'] else "Present"
+        work_entries.append({"title": role, "company": company, "location": loc,
+                             "start_date": start.strip(), "end_date": ce, "duration_years": dur,
+                             "type": "Full-time", "description": "", "key_achievements": [], "technologies_used": []})
 
     # Pattern 1
     for m in re.finditer(
         r'(?:currently\s+)?(?:working|employed|serving)\s+(?:as\s+)?(.+?)\s+(?:with|at|in|for)\s+(.+?)\s*'
-        rf'(?:since|from)\s+({ANY_DATE}){DATE_SEP}({ANY_DATE})(?:\s*[.\n]|$)', text, re.IGNORECASE):
+        rf'(?:since|from)\s+({AD}){DS}({AD})(?:\s*[.\n]|$)', text, re.IGNORECASE):
         _add(m.group(1), m.group(2), m.group(3), m.group(4))
 
     # Pattern 2a
     for m in re.finditer(
         r'(?:ex|former|previous|past)\s+(?:employee|member|associate|consultant|staff)\s+(?:of|at|with|in)\s+(.+?)'
-        rf'\s+from\s+({ANY_DATE}){DATE_SEP}({ANY_DATE})\s+as\s+(.+?)(?:\s*[.\n;]|$)', text, re.IGNORECASE):
-        co_raw = m.group(1).strip()
-        co_clean = _clean_co(co_raw)
+        rf'\s+from\s+({AD}){DS}({AD})\s+as\s+(.+?)(?:\s*[.\n;]|$)', text, re.IGNORECASE):
+        cr = m.group(1).strip()
+        cc = _cco(cr)
         role = m.group(4).strip().rstrip('.,;: ')
         loc = ""
-        lm = re.search(r'[,;]\s*(\w[\w\s]*?)$', re.sub(r'https?://\S+', '', co_raw))
+        lm = re.search(r'[,;]\s*(\w[\w\s]*?)$', re.sub(r'https?://\S+', '', cr))
         if lm:
             loc = lm.group(1).strip()
-        test_entry = {"title": role, "company": co_clean}
-        if not _is_valid_work_entry(test_entry):
+        if not _is_valid_work_entry({"title": role, "company": cc}):
             continue
-        key = _norm_key(role, co_clean)
+        key = _nk(role, cc)
         if key in seen_jobs:
             continue
         seen_jobs.add(key)
         dur = _calc_duration_from_dates(m.group(2).strip(), m.group(3).strip())
-        work_entries.append({
-            "title": role, "company": co_clean, "location": loc,
-            "start_date": m.group(2).strip(), "end_date": m.group(3).strip(),
-            "duration_years": dur, "type": "Full-time",
-            "description": "", "key_achievements": [], "technologies_used": []
-        })
+        work_entries.append({"title": role, "company": cc, "location": loc,
+                             "start_date": m.group(2).strip(), "end_date": m.group(3).strip(),
+                             "duration_years": dur, "type": "Full-time", "description": "",
+                             "key_achievements": [], "technologies_used": []})
 
     # Pattern 2b
     for m in re.finditer(
         r'(?:ex|former|previous|past)\s+(?:employee|member|associate|consultant|staff)\s+(?:of|at|with|in)\s+(.+?)'
         r'\s+(?:from)\s+(.+?)\s+(?:to|till|until)\s+(.+?)\s+(?:as)\s+(.+?)(?:\s*[.\n;,]|$)', text, re.IGNORECASE):
-        co_clean = _clean_co(m.group(1).strip())
-        cn = re.sub(r'[^a-z0-9]', '', co_clean.lower())[:20]
+        cc = _cco(m.group(1).strip())
+        cn = re.sub(r'[^a-z0-9]', '', cc.lower())[:20]
         if any(re.sub(r'[^a-z0-9]', '', e.get('company', '').lower())[:20] == cn for e in work_entries):
             continue
-        _add(m.group(4).strip(), co_clean, m.group(2).strip(), m.group(3).strip())
+        _add(m.group(4).strip(), cc, m.group(2).strip(), m.group(3).strip())
 
     # Pattern 3
     for m in re.finditer(
         r'(?:worked|employed|served|joined|was)\s+(?:as\s+)?(.+?)\s+(?:at|with|in|for)\s+(.+?)\s*'
-        rf'(?:from|since)\s+({ANY_DATE}){DATE_SEP}({ANY_DATE})(?:[.\n,;]|$)', text, re.IGNORECASE):
+        rf'(?:from|since)\s+({AD}){DS}({AD})(?:[.\n,;]|$)', text, re.IGNORECASE):
         _add(m.group(1), m.group(2), m.group(3), m.group(4))
 
     # Pattern 4: tabular
     for m in re.finditer(
-        rf'^(.+?)\s+(?:at|with|@)\s+(.+?)\s*[,|]\s*({ANY_DATE}){DATE_SEP}({ANY_DATE})(?:\s*[.\n]|$)',
+        rf'^(.+?)\s+(?:at|with|@)\s+(.+?)\s*[,|]\s*({AD}){DS}({AD})(?:\s*[.\n]|$)',
         text, re.IGNORECASE | re.MULTILINE):
         r, c = m.group(1).strip(), m.group(2).strip()
         if len(r) > 60 or len(c) > 80:
@@ -1075,7 +943,7 @@ def _extract_work_experience_from_text(text: str) -> List[Dict]:
 
     # Pattern 5: pipe
     for m in re.finditer(
-        rf'(.+?)\s*\|\s*(.+?)\s*\|\s*({ANY_DATE}){DATE_SEP}({ANY_DATE})(?:\s*[.\n]|$)', text, re.IGNORECASE):
+        rf'(.+?)\s*\|\s*(.+?)\s*\|\s*({AD}){DS}({AD})(?:\s*[.\n]|$)', text, re.IGNORECASE):
         c, r = m.group(1).strip(), m.group(2).strip()
         if len(r) > 60 or len(c) > 80:
             continue
@@ -1083,7 +951,7 @@ def _extract_work_experience_from_text(text: str) -> List[Dict]:
 
     # Pattern 6: fallback date ranges
     if not work_entries:
-        for m in re.finditer(rf'(?:from\s+|since\s+)?({ANY_DATE}){DATE_SEP}({ANY_DATE})', text, re.IGNORECASE):
+        for m in re.finditer(rf'(?:from\s+|since\s+)?({AD}){DS}({AD})', text, re.IGNORECASE):
             ss, es = m.group(1).strip(), m.group(2).strip()
             sy, sm = _parse_date_to_ym(ss)
             if not sy or sy < 1980 or sy > CURRENT_YEAR:
@@ -1095,21 +963,17 @@ def _extract_work_experience_from_text(text: str) -> List[Dict]:
                 role = rm.group(1).strip()
             cm = re.search(r'(?:at|with|in|for|company|organization|employer)[:\s]+(.+?)(?:\s+(?:from|since|as)|\n|,)', ctx, re.IGNORECASE)
             if cm:
-                company = _clean_co(cm.group(1))
+                company = _cco(cm.group(1))
             dur = _calc_duration_from_dates(ss, es)
             if dur > 0:
-                test_entry = {"title": role or "Not specified", "company": company or "Not specified"}
-                if _is_valid_work_entry(test_entry):
-                    key = _norm_key(role or "role", company or ss)
+                te = {"title": role or "Not specified", "company": company or "Not specified"}
+                if _is_valid_work_entry(te):
+                    key = _nk(role or "role", company or ss)
                     if key not in seen_jobs:
                         seen_jobs.add(key)
-                        work_entries.append({
-                            "title": role or "Not specified", "company": company or "Not specified",
-                            "location": "", "start_date": ss, "end_date": es,
-                            "duration_years": dur, "type": "Full-time",
-                            "description": "", "key_achievements": [], "technologies_used": []
-                        })
-
+                        work_entries.append({"title": te["title"], "company": te["company"], "location": "",
+                                             "start_date": ss, "end_date": es, "duration_years": dur,
+                                             "type": "Full-time", "description": "", "key_achievements": [], "technologies_used": []})
     return work_entries
 
 
@@ -1123,34 +987,34 @@ def _extract_education_regex(text: str) -> List[Dict]:
         return education
 
     degree_patterns = [
-        (r'((?:PG\.?\s*)?Bachelor\s*(?:of\s*)?(?:Science|Arts|Technology|Engineering|Commerce|Business|Computer\s*Applications?|Laws?)?)\s*(?:in\s*)?([\w\s,&]+)?', 'Bachelor'),
-        (r'((?:PG\.?\s*)?B\.?\s*(?:Tech|E|Sc|A|Com|B\.?A|S|CA|BA|Arch|Pharm|Ed|Des)\.?)\s*(?:in\s*)?([\w\s,&]+)?', 'Bachelor'),
-        (r'((?:PG\.?\s*)?B\.?Tech|BTech|B\.?E\.?|BE)\s*[-\u2013in\s]*([\w\s,&]+)?', 'Bachelor'),
-        (r'(BCA|B\.?C\.?A\.?)\s*(?:in\s*)?([\w\s,&]+)?', 'Bachelor'),
-        (r'(BBA|B\.?B\.?A\.?)\s*(?:in\s*)?([\w\s,&]+)?', 'Bachelor'),
-        (r'(B\.?Com|BCom)\s*(?:in\s*)?([\w\s,&]+)?', 'Bachelor'),
-        (r'(Master\s*(?:of\s*)?(?:Science|Arts|Technology|Engineering|Business\s*Administration|Computer\s*Applications?)?)\s*(?:in\s*)?([\w\s,&]+)?', 'Master'),
-        (r'(M\.?\s*(?:Tech|E|Sc|A|B\.?A|S|CA|BA|Phil|Ed|Des)\.?|MBA|M\.?B\.?A\.?)\s*(?:in\s*)?([\w\s,&]+)?', 'Master'),
-        (r'(M\.?Tech|MTech|M\.?E\.?|ME|M\.?S\.?|MS)\s*[-\u2013in\s]*([\w\s,&]+)?', 'Master'),
-        (r'(MCA|M\.?C\.?A\.?)\s*(?:in\s*)?([\w\s,&]+)?', 'Master'),
-        (r'(MBA|M\.?B\.?A\.?)\s*(?:in\s*)?([\w\s,&]+)?', 'Master'),
-        (r'(PG\s*(?:Diploma|Degree)?)\s*(?:in\s*)?([\w\s,&]+)?', 'Master'),
-        (r'(Ph\.?\s*D\.?|Doctorate|Doctor\s*of\s*Philosophy)\s*(?:in\s*)?([\w\s,&]+)?', 'PhD'),
-        (r'(Diploma)\s*(?:in\s*)?([\w\s,&]+)?', 'Diploma'),
-        (r'(Polytechnic)\s*(?:in\s*)?([\w\s,&]+)?', 'Diploma'),
-        (r'(ITI|I\.?T\.?I\.?)\s*(?:in\s*)?([\w\s,&]+)?', 'Diploma'),
-        (r'(Higher\s*Secondary|HSC|12th|XII|Intermediate|Senior\s*Secondary|\+2|Plus\s*Two)', 'School'),
-        (r'(Secondary|SSC|10th|X|Matriculation|High\s*School|SSLC)', 'School'),
+        (r'((?:PG\.?\s*)?Bachelor\s*(?:of\s*)?(?:Science|Arts|Technology|Engineering|Commerce|Business|Computer\s*Applications?|Laws?)?)\s*(?:in\s*)?([\w\s,&]+)?', 'B'),
+        (r'((?:PG\.?\s*)?B\.?\s*(?:Tech|E|Sc|A|Com|B\.?A|S|CA|BA|Arch|Pharm|Ed|Des)\.?)\s*(?:in\s*)?([\w\s,&]+)?', 'B'),
+        (r'((?:PG\.?\s*)?B\.?Tech|BTech|B\.?E\.?|BE)\s*[-\u2013in\s]*([\w\s,&]+)?', 'B'),
+        (r'(BCA|B\.?C\.?A\.?)\s*(?:in\s*)?([\w\s,&]+)?', 'B'),
+        (r'(BBA|B\.?B\.?A\.?)\s*(?:in\s*)?([\w\s,&]+)?', 'B'),
+        (r'(B\.?Com|BCom)\s*(?:in\s*)?([\w\s,&]+)?', 'B'),
+        (r'(Master\s*(?:of\s*)?(?:Science|Arts|Technology|Engineering|Business\s*Administration|Computer\s*Applications?)?)\s*(?:in\s*)?([\w\s,&]+)?', 'M'),
+        (r'(M\.?\s*(?:Tech|E|Sc|A|B\.?A|S|CA|BA|Phil|Ed|Des)\.?|MBA|M\.?B\.?A\.?)\s*(?:in\s*)?([\w\s,&]+)?', 'M'),
+        (r'(M\.?Tech|MTech|M\.?E\.?|ME|M\.?S\.?|MS)\s*[-\u2013in\s]*([\w\s,&]+)?', 'M'),
+        (r'(MCA|M\.?C\.?A\.?)\s*(?:in\s*)?([\w\s,&]+)?', 'M'),
+        (r'(MBA|M\.?B\.?A\.?)\s*(?:in\s*)?([\w\s,&]+)?', 'M'),
+        (r'(PG\s*(?:Diploma|Degree)?)\s*(?:in\s*)?([\w\s,&]+)?', 'M'),
+        (r'(Ph\.?\s*D\.?|Doctorate|Doctor\s*of\s*Philosophy)\s*(?:in\s*)?([\w\s,&]+)?', 'P'),
+        (r'(Diploma)\s*(?:in\s*)?([\w\s,&]+)?', 'D'),
+        (r'(Polytechnic)\s*(?:in\s*)?([\w\s,&]+)?', 'D'),
+        (r'(ITI|I\.?T\.?I\.?)\s*(?:in\s*)?([\w\s,&]+)?', 'D'),
+        (r'(Higher\s*Secondary|HSC|12th|XII|Intermediate|Senior\s*Secondary|\+2|Plus\s*Two)', 'S'),
+        (r'(Secondary|SSC|10th|X|Matriculation|High\s*School|SSLC)', 'S'),
     ]
-    inst_patterns = [
+    inst_pats = [
         r'([A-Z][A-Za-z\s\.\']+(?:University|College|Institute|School|Academy|Polytechnic))',
         r'((?:IIT|NIT|IIIT|BITS|VIT|SRM|Amity|Manipal|LPU|KIIT|MIT|Stanford|Harvard|Cambridge|Oxford)\s*[,]?\s*[\w\s]*)',
         r'(?:from|at|,)\s+([A-Z][A-Za-z\s\.\']{5,60})',
     ]
     gpa_pats = [r'(?:GPA|CGPA|CPI|Grade)[:\s]*(\d+\.?\d*)', r'(\d{1,2}(?:\.\d+)?)\s*%',
                 r'(First\s*Class(?:\s*with\s*Distinction)?|Distinction|Honors?|Honours?)']
-    year_pats = [r'((?:19|20)\d{2})\s*[-\u2013to]+\s*((?:19|20)\d{2}|Present|Current|Expected|Pursuing)',
-                 r'(?:Class\s*of|Batch|Graduated?|Expected)[:\s]*((?:19|20)\d{2})', r'((?:19|20)\d{2})']
+    yr_pats = [r'((?:19|20)\d{2})\s*[-\u2013to]+\s*((?:19|20)\d{2}|Present|Current|Expected|Pursuing)',
+               r'(?:Class\s*of|Batch|Graduated?|Expected)[:\s]*((?:19|20)\d{2})', r'((?:19|20)\d{2})']
 
     tu = text.upper()
     es = -1
@@ -1159,21 +1023,20 @@ def _extract_education_regex(text: str) -> List[Dict]:
         if idx != -1:
             es = idx
             break
-
     if es != -1:
-        edu_sec = text[es:]
+        esec = text[es:]
         for mk in ['EXPERIENCE', 'WORK', 'EMPLOYMENT', 'SKILL', 'PROJECT', 'CERTIFICATION', 'AWARD', 'ACHIEVEMENT']:
-            ei = edu_sec.upper().find(mk, 50)
+            ei = esec.upper().find(mk, 50)
             if ei != -1:
-                edu_sec = edu_sec[:ei]
+                esec = esec[:ei]
                 break
     else:
-        edu_sec = text
+        esec = text
 
     found: List[Dict] = []
     for pat, dt in degree_patterns:
         try:
-            for match in re.finditer(pat, edu_sec, re.IGNORECASE):
+            for match in re.finditer(pat, esec, re.IGNORECASE):
                 dn = match.group(1).strip() if match.group(1) else ""
                 fld = ""
                 if match.lastindex >= 2 and match.group(2):
@@ -1181,9 +1044,9 @@ def _extract_education_regex(text: str) -> List[Dict]:
                     if len(fld) > 100: fld = fld[:100]
                     if any(sw in fld.lower() for sw in ['university', 'college', 'institute', 'school', 'from', 'at', 'gpa', 'cgpa']):
                         fld = ""
-                ctx = edu_sec[max(0, match.start() - 30):min(len(edu_sec), match.end() + 250)]
+                ctx = esec[max(0, match.start() - 30):min(len(esec), match.end() + 250)]
                 entry = {"degree": dn, "field": fld, "institution": "", "year": "", "gpa": "", "location": "", "achievements": []}
-                for ip in inst_patterns:
+                for ip in inst_pats:
                     try:
                         im = re.search(ip, ctx, re.IGNORECASE)
                         if im:
@@ -1193,7 +1056,7 @@ def _extract_education_regex(text: str) -> List[Dict]:
                                 break
                     except re.error:
                         continue
-                for yp in year_pats:
+                for yp in yr_pats:
                     try:
                         ym = re.search(yp, ctx, re.IGNORECASE)
                         if ym:
@@ -1339,11 +1202,10 @@ def _basic_fallback(text, contacts, name, education, skills):
 def parse_resume_with_llm(resume_text: str, groq_api_key: str,
                           model_id: str = "llama-3.1-8b-instant",
                           doc_contacts: Optional[Dict] = None) -> Dict:
-
     if not resume_text or len(resume_text.strip()) < 50:
         return _basic_fallback(resume_text, {}, "", [], {})
 
-    # STEP 1: Regex
+    # STEP 1
     regex_contacts = _extract_contacts_regex(resume_text)
     regex_name = _extract_name_from_text(resume_text)
     regex_education = _extract_education_regex(resume_text)
@@ -1373,7 +1235,6 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
         ],
         "temperature": 0.05, "max_tokens": 6000,
     }
-
     parsed = None
     for try_model in list(dict.fromkeys([model_id, "llama-3.1-8b-instant", "llama-3.3-70b-versatile"])):
         payload["model"] = try_model
@@ -1400,24 +1261,21 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
                 pass
         except Exception:
             continue
-
     if not parsed:
         parsed = _basic_fallback(resume_text, regex_contacts, regex_name, regex_education, regex_skills)
 
-    # STEP 2b: Validate education
+    # STEP 2b
     el = parsed.get("education", [])
     parsed["education"] = _filter_valid_education(el if isinstance(el, list) else [el] if el else [])
-
-    # STEP 2c: Cross-validate education against text
     parsed["education"] = _validate_education_against_text(parsed["education"], resume_text)
 
-    # STEP 3: Contacts
+    # STEP 3
     mc = _merge_contacts(parsed, regex_contacts, doc_contacts)
     for f, v in mc.items():
         if v and (not parsed.get(f) or not _is_valid_field(f, parsed.get(f, ""))):
             parsed[f] = v
 
-    # STEP 4: Name
+    # STEP 4
     cn = parsed.get("name", "")
     if not cn or not _is_valid_field("name", cn):
         for c in [doc_contacts.get("name", ""), regex_name, parsed.get("name", "")]:
@@ -1427,7 +1285,7 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
         if not parsed.get("name") or not _is_valid_field("name", parsed.get("name", "")):
             parsed["name"] = "Unknown Candidate"
 
-    # STEP 5: Merge education + safety net
+    # STEP 5
     le = parsed.get("education", [])
     if not isinstance(le, list):
         le = []
@@ -1441,24 +1299,24 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
                     dk = _normalize_degree_key(str(e.get("degree", "")))
                     if dk:
                         ldk.add(dk)
-            for re_edu in regex_education:
-                if isinstance(re_edu, dict):
-                    dk = _normalize_degree_key(str(re_edu.get("degree", "")))
+            for re_e in regex_education:
+                if isinstance(re_e, dict):
+                    dk = _normalize_degree_key(str(re_e.get("degree", "")))
                     if dk and dk not in ldk:
-                        le.append(re_edu)
+                        le.append(re_e)
                         ldk.add(dk)
             parsed["education"] = _deduplicate_education_entries(le)
 
     if not parsed.get("education"):
         tlc = resume_text.lower()
-        if any(ind in tlc for ind in ['b.e', 'b.tech', 'btech', 'm.tech', 'mtech', 'b.sc', 'm.sc',
-                                       'bca', 'mca', 'mba', 'bachelor', 'master', 'phd', 'diploma',
-                                       'degree', 'university', 'college', 'graduated', 'pg.', 'pg ', 'engineering']):
+        if any(i in tlc for i in ['b.e', 'b.tech', 'btech', 'm.tech', 'mtech', 'b.sc', 'm.sc', 'bca', 'mca', 'mba',
+                                   'bachelor', 'master', 'phd', 'diploma', 'degree', 'university', 'college',
+                                   'graduated', 'pg.', 'pg ', 'engineering']):
             retry = _extract_education_regex(resume_text)
             if retry:
                 parsed["education"] = retry
             else:
-                for dp in [r'((?:PG\.?\s*)?B\.?E\.?|B\.?Tech|M\.?Tech|MBA|BCA|MCA|B\.?Sc|M\.?Sc|Ph\.?D)\s*[-\u2013.]\s*(.+?)(?:\s+from\s+|\s+at\s+)(.+?)(?:\n|$)',
+                for dp in [r'((?:PG\.?\s*)?B\.?E\.?|B\.?Tech|M\.?Tech|MBA|BCA|MCA|B\.?Sc|M\.?Sc|Ph\.?D)\s*[-\u2013.:]\s*(.+?)(?:\s+from\s+|\s+at\s+)(.+?)(?:\n|$)',
                            r'((?:PG\.?\s*)?B\.?E\.?|B\.?Tech|M\.?Tech|MBA|BCA|MCA)\s+(.+?)(?:\s+from\s+|\s+at\s+)(.+?)(?:\n|$)']:
                     m = re.search(dp, resume_text, re.IGNORECASE)
                     if m:
@@ -1468,7 +1326,7 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
                                                 "year": "", "gpa": "", "location": "", "achievements": []}]
                         break
 
-    # STEP 6: Skills
+    # STEP 6
     ls = parsed.get("skills", {})
     if not isinstance(ls, dict):
         ls = {"other_tools": ls} if isinstance(ls, list) else {}
@@ -1485,17 +1343,15 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
     parsed["skills"] = ls
 
     # ══════════════════════════════════════════════════════
-    # STEP 7: Experience — ALWAYS independently calculated
+    # STEP 7: Experience
     # ══════════════════════════════════════════════════════
     work_history = parsed.get("work_history", parsed.get("experience", []))
     if not isinstance(work_history, list):
         work_history = []
-
-    # Validate LLM work entries
     work_history = [j for j in work_history if isinstance(j, dict) and _is_valid_work_entry(j)]
     parsed["work_history"] = work_history
 
-    # 7b: ALWAYS run regex extraction
+    # 7b: ALWAYS run regex
     regex_work = _extract_work_experience_from_text(resume_text)
     if regex_work:
         if not work_history:
@@ -1504,62 +1360,46 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
             work_history.extend(regex_work)
         parsed["work_history"] = work_history
 
-    # 7c: Deduplicate — ONE entry per company, best quality wins
+    # 7c: Dedup — one per company
     final_work: List[Dict] = []
-    seen_companies: Dict[str, int] = {}
-
+    seen_co: Dict[str, int] = {}
     for j in parsed.get("work_history", []):
-        if not isinstance(j, dict):
+        if not isinstance(j, dict) or not _is_valid_work_entry(j):
             continue
-        if not _is_valid_work_entry(j):
-            continue
-
         co_raw = j.get('company', '') or j.get('organization', '') or ''
         ti_raw = j.get('title', '') or j.get('role', '') or j.get('position', '') or ''
-
-        co_clean = re.sub(r'https?://\S+', '', co_raw)
-        co_clean = re.sub(r'[,;]\s*\w+$', '', co_clean)
-        co_clean = re.sub(r'\s*[-\u2013\u2014]\s*$', '', co_clean).strip()
-
-        co_words = re.sub(r'[^a-z0-9\s]', '', co_clean.lower()).split()
-        co_core = [w for w in co_words if w not in LOCATION_WORDS and len(w) > 1]
-        co_norm = ''.join(co_core)[:20] if co_core else ''.join(co_words)[:20]
-
-        if not co_norm:
-            co_norm = re.sub(r'[^a-z0-9]', '', ti_raw.lower())[:20]
-        if not co_norm:
+        cc = re.sub(r'https?://\S+', '', co_raw)
+        cc = re.sub(r'[,;]\s*\w+$', '', cc)
+        cc = re.sub(r'\s*[-\u2013\u2014]\s*$', '', cc).strip()
+        cw = re.sub(r'[^a-z0-9\s]', '', cc.lower()).split()
+        core = [w for w in cw if w not in LOCATION_WORDS and len(w) > 1]
+        cn = ''.join(core)[:20] if core else ''.join(cw)[:20]
+        if not cn:
+            cn = re.sub(r'[^a-z0-9]', '', ti_raw.lower())[:20]
+        if not cn:
             final_work.append(j)
             continue
-
-        # Calculate duration from dates (NEVER trust duration_years from LLM)
-        start_str = str(j.get('start_date', j.get('from', '')))
-        end_str = str(j.get('end_date', j.get('to', '')))
-        indep_dur = _calc_duration_from_dates(start_str, end_str) if start_str else 0.0
-
-        has_start = bool(start_str.strip())
-        has_end = bool(end_str.strip())
-        quality = indep_dur + (1.0 if has_start and has_end else 0) + (0.5 if has_start else 0)
-
-        # Fix the stored duration_years
-        if indep_dur > 0:
-            j["duration_years"] = indep_dur
-
-        if co_norm in seen_companies:
-            ei = seen_companies[co_norm]
+        ss = str(j.get('start_date', j.get('from', '')))
+        es = str(j.get('end_date', j.get('to', '')))
+        idur = _calc_duration_from_dates(ss, es) if ss else 0.0
+        q = idur + (1.0 if ss and es else 0) + (0.5 if ss else 0)
+        if idur > 0:
+            j["duration_years"] = idur
+        if cn in seen_co:
+            ei = seen_co[cn]
             ex = final_work[ei]
-            ex_start = str(ex.get('start_date', ex.get('from', '')))
-            ex_end = str(ex.get('end_date', ex.get('to', '')))
-            ex_dur = _calc_duration_from_dates(ex_start, ex_end) if ex_start else 0.0
-            ex_quality = ex_dur + (1.0 if ex_start and ex_end else 0) + (0.5 if ex_start else 0)
-            if quality > ex_quality:
+            exs = str(ex.get('start_date', ex.get('from', '')))
+            exe = str(ex.get('end_date', ex.get('to', '')))
+            exd = _calc_duration_from_dates(exs, exe) if exs else 0.0
+            exq = exd + (1.0 if exs and exe else 0) + (0.5 if exs else 0)
+            if q > exq:
                 final_work[ei] = j
         else:
-            seen_companies[co_norm] = len(final_work)
+            seen_co[cn] = len(final_work)
             final_work.append(j)
-
     parsed["work_history"] = final_work
 
-    # 7d: ALWAYS recalculate total from dates
+    # 7d: Recalculate total from dates
     total_exp = 0.0
     for job in final_work:
         if not isinstance(job, dict):
@@ -1578,121 +1418,97 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
         except (ValueError, TypeError):
             pass
     parsed["total_experience_years"] = round(total_exp, 1)
-                              
-    # 7e: If STILL 0 experience, try to extract from profile/summary text
-    # Handles resumes that say "3+ years of experience" without specific dates
+
+    # 7e: Extract experience from profile text if still 0
     if parsed.get("total_experience_years", 0) == 0:
-        summary_text = (
-            parsed.get("professional_summary", "")
-            or parsed.get("summary", "")
-            or ""
-        )
-        # Also check full resume text
-        texts_to_check = [summary_text, resume_text[:3000]]
-        
-        for check_text in texts_to_check:
+        for check_text in [parsed.get("professional_summary", "") or parsed.get("summary", "") or "", resume_text[:3000]]:
             if not check_text:
                 continue
-            check_lower = check_text.lower()
-            
-            # Patterns: "3+ years", "3 years of experience", "over 5 years"
-            exp_patterns = [
-                r'(\d+)\s*\+\s*years?\s*(?:of\s*)?(?:experience|exp)',
-                r'(\d+)\s*(?:\+\s*)?years?\s*(?:of\s*)?(?:experience|exp)',
-                r'over\s+(\d+)\s*years?\s*(?:of\s*)?(?:experience|exp)',
-                r'more\s+than\s+(\d+)\s*years?\s*(?:of\s*)?(?:experience|exp)',
-                r'(\d+)\s*(?:\+\s*)?years?\s*(?:of\s*)?(?:industry|work|professional)',
-                r'(\d+)\s*(?:\+\s*)?(?:yrs?|years?)\s*(?:of\s*)?(?:experience|exp)',
-                r'experience\s*(?:of\s*)?(\d+)\s*\+?\s*years?',
-            ]
-            
-            for pattern in exp_patterns:
-                match = re.search(pattern, check_lower)
-                if match:
-                    years = int(match.group(1))
-                    if 1 <= years <= 40:
-                        parsed["total_experience_years"] = float(years)
+            cl = check_text.lower()
+            for ep in [r'(\d+)\s*\+\s*years?\s*(?:of\s*)?(?:experience|exp)',
+                       r'(\d+)\s*(?:\+\s*)?years?\s*(?:of\s*)?(?:experience|exp)',
+                       r'over\s+(\d+)\s*years?\s*(?:of\s*)?(?:experience|exp)',
+                       r'more\s+than\s+(\d+)\s*years?\s*(?:of\s*)?(?:experience|exp)',
+                       r'(\d+)\s*(?:\+\s*)?years?\s*(?:of\s*)?(?:industry|work|professional)',
+                       r'experience\s*(?:of\s*)?(\d+)\s*\+?\s*years?']:
+                em = re.search(ep, cl)
+                if em:
+                    yrs = int(em.group(1))
+                    if 1 <= yrs <= 40:
+                        parsed["total_experience_years"] = float(yrs)
                         break
-            
             if parsed.get("total_experience_years", 0) > 0:
                 break
-    
-    # 7f: If we have "CURRENTLY WORKING" but no work_history entries,
-    # try to create one from the profile/header text
-    if not parsed.get("work_history"):
-        currently_patterns = [
-            r'currently\s+working\s+(?:as\s+)?(?:a\s+)?[\'"]?(.+?)[\'"]?\s+(?:for|with|at|in)\s+(.+?)(?:\.|$|\n)',
-            r'currently\s+working\s+(?:as\s+)?(?:a\s+)?[\'"]?(.+?)[\'"]?\s+(?:for|with|at|in)\s+(?:client\s+)?(.+?)(?:\.|$|\n)',
-            r'working\s+(?:as\s+)?(?:a\s+)?[\'"]?(.+?)[\'"]?\s+(?:for|with|at|in)\s+(.+?)(?:\.|$|\n)',
-        ]
-        
-        for pattern in currently_patterns:
-            match = re.search(pattern, resume_text, re.IGNORECASE)
-            if match:
-                role = match.group(1).strip().rstrip('\'\"')
-                company = match.group(2).strip().rstrip('.,;')
-                company = re.sub(r'https?://\S+', '', company).strip()
-                
-                if _is_valid_work_entry({"title": role, "company": company}):
-                    exp_years = parsed.get("total_experience_years", 0)
-                    parsed["work_history"] = [{
-                        "title": role,
-                        "company": company,
-                        "location": "",
-                        "start_date": "",
-                        "end_date": "Present",
-                        "duration_years": exp_years if exp_years > 0 else 0,
-                        "type": "Full-time",
-                        "description": "",
-                        "key_achievements": [],
-                        "technologies_used": []
-                    }]
-                    break
-        
-        # Also check header line for "Role, Company" pattern
-        if not parsed.get("work_history"):
-            header_lines = resume_text.strip().split('\n')[:5]
-            for line in header_lines:
-                line = line.strip()
-                # "Python Developer, IBM - Pune" or "Python Developer at Google"
-                role_company = re.match(
-                    r'^(.+?)\s*[,\-–—|]\s*(.+?)(?:\s*[,\-–—|]\s*.+)?$', line
-                )
-                if role_company:
-                    role = role_company.group(1).strip()
-                    company = role_company.group(2).strip()
-                    company = re.sub(r'https?://\S+', '', company).strip().rstrip('-,. ')
-                    
-                    # Must look like a role (contains "developer", "engineer", etc.)
-                    role_keywords = [
-                        'developer', 'engineer', 'analyst', 'scientist', 'manager',
-                        'designer', 'architect', 'consultant', 'lead', 'specialist',
-                        'administrator', 'coordinator', 'executive', 'officer',
-                    ]
-                    if any(kw in role.lower() for kw in role_keywords):
-                        if _is_valid_work_entry({"title": role, "company": company}):
-                            exp_years = parsed.get("total_experience_years", 0)
-                            parsed["work_history"] = [{
-                                "title": role,
-                                "company": company,
-                                "location": "",
-                                "start_date": "",
-                                "end_date": "Present",
-                                "duration_years": exp_years if exp_years > 0 else 0,
-                                "type": "Full-time",
-                                "description": "",
-                                "key_achievements": [],
-                                "technologies_used": []
-                            }]
-                            
-                            # Update current role/company
-                            if not parsed.get("current_role"):
-                                parsed["current_role"] = role
-                            if not parsed.get("current_company"):
-                                parsed["current_company"] = company
-                            break
 
-    # STEP 8: Current role/company
+    # 7f: Create work entry from header/profile if still empty
+    if not parsed.get("work_history"):
+        header_lines = resume_text.strip().split('\n')[:10]
+        for line in header_lines:
+            line = line.strip()
+            if not line or len(line) < 5 or _is_spaced_out_text(line):
+                continue
+            rcp = (r'^(.+?(?:Developer|Engineer|Analyst|Scientist|Manager|Designer|Architect|'
+                   r'Consultant|Lead|Specialist|Administrator|Coordinator|Executive|Officer))'
+                   r'\s*[,\-\u2013\u2014|]+\s*(.+?)(?:\s*[,\-\u2013\u2014|]+\s*.+)?$')
+            rm = re.match(rcp, line, re.IGNORECASE)
+            if rm:
+                role = rm.group(1).strip()
+                co_raw = rm.group(2).strip()
+                company = re.sub(r'https?://\S+', '', co_raw).strip()
+                company = re.sub(r'[,\-\u2013\u2014|]\s*\w+$', '', company).strip().rstrip('-,. ;:')
+                if company and len(company) >= 2 and _is_valid_work_entry({"title": role, "company": company}):
+                    ey = parsed.get("total_experience_years", 0)
+                    try:
+                        ey = float(ey)
+                    except (ValueError, TypeError):
+                        ey = 0
+                    parsed["work_history"] = [{"title": role, "company": company, "location": "",
+                                               "start_date": "", "end_date": "Present", "duration_years": ey if ey > 0 else 0,
+                                               "type": "Full-time", "description": "", "key_achievements": [], "technologies_used": []}]
+                    if not parsed.get("current_role"):
+                        parsed["current_role"] = role
+                    if not parsed.get("current_company"):
+                        parsed["current_company"] = company
+                    break
+
+        # Strategy B: "currently working" in text body
+        if not parsed.get("work_history"):
+            for cp in [r'currently\s+working\s+(?:as\s+)?(?:a\s+)?[\'"]?(.+?)[\'"]?\s+'
+                       r'(?:for|with|at|in)\s+(?:client\s+)?(.+?)(?:\.|,|\n|$)']:
+                cm = re.search(cp, resume_text, re.IGNORECASE)
+                if cm:
+                    role = cm.group(1).strip().rstrip('\'\"')
+                    company = cm.group(2).strip().rstrip('.,;')
+                    company = re.sub(r'https?://\S+', '', company).strip()
+                    # If company looks like project description, use header company
+                    if len(company.split()) > 4 or any(w in company.lower() for w in
+                            ['voice', 'message', 'routing', 'optimization', 'project', 'system']):
+                        company = parsed.get("current_company", "")
+                        if not company:
+                            for hl in header_lines[:5]:
+                                hl = hl.strip()
+                                if not hl or _is_spaced_out_text(hl):
+                                    continue
+                                hm = re.search(r'(?:Developer|Engineer|Analyst|Scientist|Manager)\s*[,\-\u2013\u2014|]+\s*(\w+)', hl, re.IGNORECASE)
+                                if hm:
+                                    company = hm.group(1).strip()
+                                    break
+                    if company and _is_valid_work_entry({"title": role, "company": company}):
+                        ey = parsed.get("total_experience_years", 0)
+                        try:
+                            ey = float(ey)
+                        except (ValueError, TypeError):
+                            ey = 0
+                        parsed["work_history"] = [{"title": role, "company": company, "location": "",
+                                                   "start_date": "", "end_date": "Present", "duration_years": ey if ey > 0 else 0,
+                                                   "type": "Full-time", "description": "", "key_achievements": [], "technologies_used": []}]
+                        if not parsed.get("current_role"):
+                            parsed["current_role"] = role
+                        if not parsed.get("current_company"):
+                            parsed["current_company"] = company
+                        break
+
+    # STEP 8
     if not parsed.get("current_role") or not parsed.get("current_company"):
         wh = parsed.get("work_history", [])
         if isinstance(wh, list) and wh and isinstance(wh[0], dict):
@@ -1701,7 +1517,7 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
             if not parsed.get("current_company"):
                 parsed["current_company"] = wh[0].get("company", "") or wh[0].get("organization", "")
 
-    # STEP 9: Defaults
+    # STEP 9
     defaults: Dict = {
         "name": "Unknown Candidate", "email": "", "phone": "", "address": "",
         "linkedin": "", "github": "", "portfolio": "", "location": "",
@@ -1713,7 +1529,6 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
     for f, d in defaults.items():
         if f not in parsed:
             parsed[f] = d
-
     return parsed
 
 
