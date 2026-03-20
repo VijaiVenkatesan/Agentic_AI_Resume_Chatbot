@@ -565,103 +565,186 @@ def _validate_education_against_text(el: List[Dict], resume_text: str) -> List[D
 # ═══════════════════════════════════════════════════════════════
 
 def _extract_contacts_regex(text: str) -> Dict:
-    contacts: Dict[str, str] = {"email": "", "phone": "", "address": "", "linkedin": "", "github": "", "portfolio": "", "location": ""}
+    contacts: Dict[str, str] = {
+        "email": "", "phone": "", "address": "",
+        "linkedin": "", "github": "", "portfolio": "", "location": ""
+    }
     if not text:
         return contacts
 
-    # EMAIL
-    for p in [r'[\w._%+-]+@[\w.-]+\.[a-zA-Z]{2,}', r'[\w._%+-]+\s*@\s*[\w.-]+\s*\.\s*[a-zA-Z]{2,}',
-              r'[\w._%+-]+\s*\[\s*at\s*\]\s*[\w.-]+\s*\.\s*[a-zA-Z]{2,}',
-              r'[\w._%+-]+\s*\(\s*at\s*\)\s*[\w.-]+\s*\.\s*[a-zA-Z]{2,}',
-              r'(?:email|e-mail|mail)[\s.:]*[\w._%+-]+@[\w.-]+\.[a-zA-Z]{2,}']:
+    # ═══════ EMAIL ═══════
+    email_patterns = [
+        r'[\w._%+-]+@[\w.-]+\.[a-zA-Z]{2,}',
+        r'[\w._%+-]+\s*@\s*[\w.-]+\s*\.\s*[a-zA-Z]{2,}',
+        r'[\w._%+-]+\s*\[\s*at\s*\]\s*[\w.-]+\s*\.\s*[a-zA-Z]{2,}',
+        r'[\w._%+-]+\s*\(\s*at\s*\)\s*[\w.-]+\s*\.\s*[a-zA-Z]{2,}',
+        r'(?:email|e-mail|mail)[\s.:]*[\w._%+-]+@[\w.-]+\.[a-zA-Z]{2,}',
+    ]
+    for p in email_patterns:
         m = re.search(p, text, re.IGNORECASE)
         if m:
-            email = re.sub(r'^(?:email|e-mail|mail)[\s.:]*', '', m.group(0), flags=re.IGNORECASE)
+            email = m.group(0).strip()
+            # Remove label prefix
+            email = re.sub(r'^(?:email|e-mail|mail)[\s.:]*', '', email, flags=re.IGNORECASE)
+            # Remove spaces
             email = re.sub(r'\s+', '', email)
+            # Fix [at] / (at)
             email = re.sub(r'\[\s*at\s*\]|\(\s*at\s*\)', '@', email, flags=re.IGNORECASE)
-            if '@' in email:
-                lp = email.split('@')[0]
-                pm = re.match(r'^(\d{4,7})[.\-_]', lp)
-                if pm:
-                    email = email[len(pm.group(1)) + 1:]
-                if not pm:
-                    dp = re.match(r'^(\d{5,7})([a-zA-Z])', lp)
-                    if dp:
-                        email = lp[len(dp.group(1)):] + '@' + email.split('@')[1]
-            if '@' in email and '.' in email.split('@')[-1]:
-                fl = email.split('@')[0]
-                if any(c.isalpha() for c in fl) and len(fl) >= 2:
-                    contacts["email"] = email
-                    break
 
-    # PHONE
-    for p in [r'\+\d{1,3}[-.\s]?\(?\d{2,5}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}', r'\+\d{10,15}',
-              r'\+91[-.\s]?\d{5}[-.\s]?\d{5}', r'\+91[-.\s]?\d{10}',
-              r'(?<!\d)91[-.\s]?\d{10}(?!\d)', r'\(\d{3}\)\s*\d{3}[-.\s]?\d{4}',
-              r'(?<!\d)\d{3}[-.\s]\d{3}[-.\s]\d{4}(?!\d)',
-              r'(?:Phone|Ph|Tel|Mobile|Cell|Contact|M|T|P|Call)[\s.:]*[\+]?[\d][\d\s\-().]{8,18}',
-              r'(?<!\d)\d{5}[-.\s]?\d{5}(?!\d)', r'(?<!\d)\d{10}(?!\d)']:
+            # Fix: remove leading PIN/ZIP codes that get merged with email
+            # e.g. "411046.sanketrg1997@gmail.com" → "sanketrg1997@gmail.com"
+            if '@' in email:
+                local_part = email.split('@')[0]
+                pin_match = re.match(r'^(\d{4,7})[.\-_]', local_part)
+                if pin_match:
+                    email = email[len(pin_match.group(1)) + 1:]
+
+                # Also handle: "411046sanketrg1997@gmail.com" (no separator)
+                # If local part starts with 5-6 digits followed by letters
+                if not pin_match:
+                    local_part = email.split('@')[0]
+                    digit_prefix = re.match(r'^(\d{5,7})([a-zA-Z])', local_part)
+                    if digit_prefix:
+                        email = local_part[len(digit_prefix.group(1)):] + '@' + email.split('@')[1]
+
+            # Final validation
+            if '@' in email and '.' in email.split('@')[-1]:
+                final_local = email.split('@')[0]
+                # Local part must have at least one letter
+                if any(c.isalpha() for c in final_local):
+                    # Reject if local part is too short (single char)
+                    if len(final_local) >= 2:
+                        contacts["email"] = email
+                        break
+
+    # ═══════ PHONE ═══════
+    phone_patterns = [
+        r'\+\d{1,3}[-.\s]?\(?\d{2,5}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}',
+        r'\+\d{1,3}[-.\s]?\d{4,5}[-.\s]?\d{5,6}',
+        r'\+\d{10,15}',
+        r'\+91[-.\s]?\d{5}[-.\s]?\d{5}',
+        r'\+91[-.\s]?\d{10}',
+        r'(?<!\d)91[-.\s]?\d{10}(?!\d)',
+        r'(?<!\d)0\d{2,4}[-.\s]?\d{6,8}(?!\d)',
+        r'\(\d{3}\)\s*\d{3}[-.\s]?\d{4}',
+        r'(?<!\d)\d{3}[-.\s]\d{3}[-.\s]\d{4}(?!\d)',
+        r'(?<!\d)1[-.\s]?\d{3}[-.\s]?\d{3}[-.\s]?\d{4}(?!\d)',
+        r'\+44[-.\s]?\d{4}[-.\s]?\d{6}',
+        r'(?<!\d)0\d{4}[-.\s]?\d{6}(?!\d)',
+        r'(?:Phone|Ph|Tel|Mobile|Cell|Contact|M|T|P|Call)[\s.:]*[\+]?[\d][\d\s\-().]{8,18}',
+        r'(?<!\d)\d{3}[-.\s]?\d{3}[-.\s]?\d{4}(?!\d)',
+        r'(?<!\d)\d{5}[-.\s]?\d{5}(?!\d)',
+        r'(?<!\d)\d{10}(?!\d)',
+    ]
+    for p in phone_patterns:
         try:
             for match in re.findall(p, text, re.IGNORECASE):
-                cl = re.sub(r'^(?:Phone|Ph|Tel|Mobile|Cell|Contact|M|T|P|Call)[\s.:]*', '', match, flags=re.IGNORECASE).strip()
-                if 10 <= len(re.sub(r'[^\d]', '', cl)) <= 15:
-                    contacts["phone"] = cl
+                cleaned = re.sub(
+                    r'^(?:Phone|Ph|Tel|Mobile|Cell|Contact|M|T|P|Call)[\s.:]*',
+                    '', match, flags=re.IGNORECASE
+                ).strip()
+                digits = re.sub(r'[^\d]', '', cleaned)
+                if 10 <= len(digits) <= 15:
+                    contacts["phone"] = cleaned
                     break
             if contacts["phone"]:
                 break
         except re.error:
             continue
 
-    # LINKEDIN
-    for p in [r'(?:https?://)?(?:www\.)?linkedin\.com/in/[\w-]+/?', r'linkedin\.com/in/[\w-]+']:
+    # ═══════ LINKEDIN ═══════
+    for p in [
+        r'(?:https?://)?(?:www\.)?linkedin\.com/in/[\w-]+/?',
+        r'linkedin\.com/in/[\w-]+',
+    ]:
         m = re.search(p, text, re.IGNORECASE)
         if m:
             contacts["linkedin"] = m.group(0).strip()
             break
 
-    # GITHUB
-    for p in [r'(?:https?://)?(?:www\.)?github\.com/[\w-]+/?', r'github\.com/[\w-]+']:
+    # ═══════ GITHUB ═══════
+    for p in [
+        r'(?:https?://)?(?:www\.)?github\.com/[\w-]+/?',
+        r'github\.com/[\w-]+',
+    ]:
         m = re.search(p, text, re.IGNORECASE)
         if m:
             contacts["github"] = m.group(0).strip()
             break
 
-    # PORTFOLIO
-    for p in [r'(?:portfolio|website|web|site|blog)[\s.:]+(?:https?://)?[\w.-]+\.[a-z]{2,}[\w/.-]*',
-              r'(?:https?://)?(?:www\.)?[\w-]+\.(?:dev|io|me|tech|design|codes?|site|online|app)/?[\w/.-]*']:
+    # ═══════ PORTFOLIO ═══════
+    portfolio_patterns = [
+        r'(?:portfolio|website|web|site|blog)[\s.:]+(?:https?://)?[\w.-]+\.[a-z]{2,}[\w/.-]*',
+        r'(?:https?://)?(?:www\.)?[\w-]+\.(?:dev|io|me|tech|design|codes?|site|online|app)/?[\w/.-]*',
+    ]
+    for p in portfolio_patterns:
         for match in re.findall(p, text, re.IGNORECASE):
-            url = re.sub(r'^(?:portfolio|website|web|site|blog)[\s.:]+', '', match, flags=re.IGNORECASE).strip()
-            ul = url.lower()
-            if 'linkedin' not in ul and 'github' not in ul and '@' not in url and 'ibm.com' not in ul:
+            url = re.sub(
+                r'^(?:portfolio|website|web|site|blog)[\s.:]+',
+                '', match, flags=re.IGNORECASE
+            ).strip()
+            # Skip linkedin, github, and email-like patterns
+            url_lower = url.lower()
+            if ('linkedin' not in url_lower
+                    and 'github' not in url_lower
+                    and '@' not in url
+                    and 'ibm.com' not in url_lower  # Skip employer URLs in header
+                    ):
                 contacts["portfolio"] = url
                 break
         if contacts["portfolio"]:
             break
 
-    # ADDRESS
-    for p in [r'(?:Address|Location|Residence|Home|Addr)[\s.:]+([^\n]{15,150})',
-              r'(?:No[.:]?\s*)?[\d]+[,\s]+[\w\s]+(?:Street|St|Road|Rd|Avenue|Ave|Nagar|Colony|Layout|Block|Lane|Apt|Apartment|Floor|Fl|Building|Bldg|Society|Housing)[\w\s,.-]+(?:\d{5,6})',
-              r'[\w\s]+,\s*[\w\s]+,\s*[\w\s]+-?\s*\d{5,6}',
-              r'[\'"\u2018\u2019]?[\w\s]+(?:Society|Housing|Apartment|Complex|Residency)[\w\s,.-]+\d{5,6}']:
+    # ═══════ ADDRESS ═══════
+    address_patterns = [
+        # Labeled address
+        r'(?:Address|Location|Residence|Home|Addr)[\s.:]+([^\n]{15,150})',
+        # With PIN/ZIP codes
+        r'(?:No[.:]?\s*)?[\d]+[,\s]+[\w\s]+(?:Street|St|Road|Rd|Avenue|Ave|Nagar|Colony|'
+        r'Layout|Block|Lane|Apt|Apartment|Floor|Fl|Building|Bldg|Society|Housing)[\w\s,.-]+(?:\d{5,6})',
+        # City, State, PIN pattern
+        r'[\w\s]+,\s*[\w\s]+,\s*[\w\s]+-?\s*\d{5,6}',
+        # Housing society patterns (common in Indian addresses)
+        r'[\'"\u2018\u2019]?[\w\s]+(?:Society|Housing|Apartment|Complex|Residency)[\w\s,.-]+\d{5,6}',
+    ]
+    for p in address_patterns:
         m = re.search(p, text, re.IGNORECASE)
         if m:
             addr = (m.group(1) if m.lastindex else m.group(0)).strip()
-            addr = re.sub(r'^(?:Address|Location|Residence|Home|Addr)[\s.:]+', '', addr, flags=re.IGNORECASE).strip()
+            addr = re.sub(
+                r'^(?:Address|Location|Residence|Home|Addr)[\s.:]+',
+                '', addr, flags=re.IGNORECASE
+            ).strip()
+            # Clean leading quotes/apostrophes
             addr = addr.lstrip("'\"\u2018\u2019")
             if 15 < len(addr) < 200:
                 contacts["address"] = addr
                 break
 
-    # LOCATION
-    for p in [r'(?:Location|Based in|Located at|City|Current Location)[\s.:]+([A-Za-z][A-Za-z\s,]+)',
-              r'\b(Bangalore|Bengaluru|Mumbai|Delhi|NCR|Chennai|Hyderabad|Pune|Kolkata|Noida|Gurgaon|Gurugram|Ahmedabad|Jaipur|Lucknow|Chandigarh|Indore|Bhopal|Kochi|Coimbatore|Trivandrum|Mysore|Nagpur|Kolhapur)\b',
-              r'\b(New York|NYC|San Francisco|SF|Los Angeles|LA|Chicago|Seattle|Boston|Austin|Denver|Atlanta)\b',
-              r'\b(London|Berlin|Amsterdam|Dublin|Singapore|Tokyo|Sydney|Toronto|Vancouver|Melbourne)\b',
-              r'\b(India|USA|US|United States|UK|United Kingdom|Canada|Australia|Germany|Netherlands|Singapore|UAE)\b']:
+    # ═══════ LOCATION ═══════
+    location_patterns = [
+        r'(?:Location|Based in|Located at|City|Current Location)[\s.:]+([A-Za-z][A-Za-z\s,]+)',
+        r'\b(Bangalore|Bengaluru|Mumbai|Delhi|NCR|Chennai|Hyderabad|Pune|Kolkata|'
+        r'Noida|Gurgaon|Gurugram|Ahmedabad|Jaipur|Lucknow|Chandigarh|Indore|Bhopal|'
+        r'Kochi|Coimbatore|Trivandrum|Mysore|Nagpur|Surat|Vadodara|Bhubaneswar|'
+        r'Patna|Ranchi|Guwahati|Visakhapatnam|Vijayawada|Kolhapur)\b',
+        r'\b(New York|NYC|San Francisco|SF|Los Angeles|LA|Chicago|Seattle|Boston|'
+        r'Austin|Denver|Atlanta|Dallas|Houston|Phoenix|San Diego|San Jose|Portland|'
+        r'Miami|Washington DC|Philadelphia)\b',
+        r'\b(London|Berlin|Amsterdam|Dublin|Singapore|Tokyo|Sydney|Toronto|'
+        r'Vancouver|Melbourne|Paris|Munich|Barcelona|Stockholm|Copenhagen|'
+        r'Zurich|Dubai|Hong Kong)\b',
+        r'\b(India|USA|US|United States|UK|United Kingdom|Canada|Australia|'
+        r'Germany|Netherlands|Singapore|UAE)\b',
+    ]
+    for p in location_patterns:
         m = re.search(p, text, re.IGNORECASE)
         if m:
             loc = (m.group(1) if m.lastindex else m.group(0)).strip()
-            loc = re.sub(r'^(?:Location|Based in|Located at|City|Current Location)[\s.:]+', '', loc, flags=re.IGNORECASE).strip()
+            loc = re.sub(
+                r'^(?:Location|Based in|Located at|City|Current Location)[\s.:]+',
+                '', loc, flags=re.IGNORECASE
+            ).strip()
             if 2 <= len(loc) <= 100:
                 contacts["location"] = loc
                 break
