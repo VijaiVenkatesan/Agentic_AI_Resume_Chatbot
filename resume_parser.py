@@ -1081,39 +1081,113 @@ def _extract_work_experience_from_text(text: str) -> List[Dict]:
 
     # ════════════════════════════════════════════
     # Pattern 2: "Ex Employee of COMPANY ...from DATE to DATE as ROLE"
-    # Split into sub-patterns for robustness
+    # Handles URLs, locations, and other noise between company and dates
     # ════════════════════════════════════════════
 
-    # 2a: "Ex Employee of COMPANY URL, LOCATION from DATE to DATE as ROLE."
+    # 2a: "Ex Employee of COMPANY [URL] [,LOCATION] from DATE to DATE as ROLE."
     for m in re.finditer(
         r'(?:ex|former|previous|past)\s+'
-        r'(?:employee|member|associate|consultant)\s+'
+        r'(?:employee|member|associate|consultant|staff)\s+'
         r'(?:of|at|with|in)\s+'
-        r'(.+?)'                            # company (greedy but stops at from)
+        r'(.+?)'                            # company + possible URL + location
         r'\s+from\s+'
-        r'(\w+\s+\d{4})'                    # start date: "October 2019"
+        r'((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+\d{4})'  # start: "October 2019"
         r'\s+to\s+'
-        r'(\w+\s+\d{4})'                    # end date: "February 2023"
+        r'((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+\d{4})'  # end: "February 2023"
         r'\s+as\s+'
         r'(.+?)'                            # role
         r'(?:\s*[.\n;]|$)',
         text, re.IGNORECASE
     ):
-        _add_entry(m.group(4), m.group(1), m.group(2), m.group(3))
+        company_raw = m.group(1).strip()
+        # Clean company: remove URLs, trailing location/punctuation
+        company_clean = re.sub(r'https?://\S+', '', company_raw).strip()
+        company_clean = re.sub(r'[,;]\s*\w+$', '', company_clean).strip()  # Remove trailing ",Pune"
+        company_clean = company_clean.rstrip('-,. ;:')
 
-    # 2b: Looser version — "Ex Employee of COMPANY from DATE to DATE as ROLE"
-    if not any(e.get("company", "").lower().startswith("tech") for e in work_entries):
-        for m in re.finditer(
-            r'(?:ex|former|previous|past)\s+'
-            r'(?:employee|member|associate|consultant)\s+'
-            r'(?:of|at|with|in)\s+'
-            r'(.+?)\s+'
-            r'(?:from)\s+(.+?)\s+'
-            r'(?:to|till|until)\s+(.+?)\s+'
-            r'(?:as)\s+(.+?)(?:\s*[.\n;,]|$)',
-            text, re.IGNORECASE
-        ):
-            _add_entry(m.group(4), m.group(1), m.group(2), m.group(3))
+        role = m.group(4).strip().rstrip('.,;: ')
+        start_str = m.group(2).strip()
+        end_str = m.group(3).strip()
+
+        # Extract location from company_raw if present
+        location = ""
+        loc_match = re.search(r'[,;]\s*(\w[\w\s]*?)$', re.sub(r'https?://\S+', '', company_raw))
+        if loc_match:
+            location = loc_match.group(1).strip()
+
+        job_key = _normalize_job_key(role, company_clean)
+        if job_key in seen_jobs:
+            continue
+        seen_jobs.add(job_key)
+
+        sy, sm = _parse_work_date(start_str)
+        ey, em = _parse_work_date(end_str)
+        dur_years = _calc_dur(sy, sm, ey, em)
+
+        work_entries.append({
+            "title": role,
+            "company": company_clean,
+            "location": location,
+            "start_date": start_str,
+            "end_date": end_str,
+            "duration_years": dur_years,
+            "type": "Full-time",
+            "description": "",
+            "key_achievements": [],
+            "technologies_used": []
+        })
+
+    # 2b: Looser version — handles different word orders
+    for m in re.finditer(
+        r'(?:ex|former|previous|past)\s+'
+        r'(?:employee|member|associate|consultant|staff)\s+'
+        r'(?:of|at|with|in)\s+'
+        r'(.+?)'
+        r'\s+(?:from)\s+(.+?)\s+'
+        r'(?:to|till|until)\s+(.+?)\s+'
+        r'(?:as)\s+(.+?)(?:\s*[.\n;,]|$)',
+        text, re.IGNORECASE
+    ):
+        company_raw = m.group(1).strip()
+        company_clean = re.sub(r'https?://\S+', '', company_raw).strip()
+        company_clean = re.sub(r'[,;]\s*\w+$', '', company_clean).strip()
+        company_clean = company_clean.rstrip('-,. ;:')
+
+        role = m.group(4).strip().rstrip('.,;: ')
+
+        # Check if this company is already captured
+        company_norm_check = re.sub(r'[^a-z0-9]', '', company_clean.lower())[:20]
+        already_have = any(
+            re.sub(r'[^a-z0-9]', '', e.get('company', '').lower())[:20] == company_norm_check
+            for e in work_entries
+        )
+        if already_have:
+            continue
+
+        start_str = m.group(2).strip()
+        end_str = m.group(3).strip()
+
+        job_key = _normalize_job_key(role, company_clean)
+        if job_key in seen_jobs:
+            continue
+        seen_jobs.add(job_key)
+
+        sy, sm = _parse_work_date(start_str)
+        ey, em = _parse_work_date(end_str)
+        dur_years = _calc_dur(sy, sm, ey, em)
+
+        work_entries.append({
+            "title": role,
+            "company": company_clean,
+            "location": "",
+            "start_date": start_str,
+            "end_date": end_str,
+            "duration_years": dur_years,
+            "type": "Full-time",
+            "description": "",
+            "key_achievements": [],
+            "technologies_used": []
+        })
 
     # ════════════════════════════════════════════
     # Pattern 3: "worked/joined as ROLE at COMPANY from DATE to DATE"
@@ -1841,46 +1915,68 @@ def parse_resume_with_llm(
                 parsed["total_experience_years"] = recalculated
 
     # 7c: Deduplicate work_history entries (final pass)
+    # Group by company — keep the entry with highest duration per company
     final_work: List[Dict] = []
-    seen_work_keys: Set[str] = set()
+    seen_companies: Dict[str, int] = {}  # company_norm → index in final_work
+
     for j in parsed.get("work_history", []):
         if not isinstance(j, dict):
             continue
+
         company_raw = (
-            j.get('company', '') or j.get('organization', '')
+            j.get('company', '') or j.get('organization', '') or ''
         )
         title_raw = (
-            j.get('title', '') or j.get('role', '') or j.get('position', '')
+            j.get('title', '') or j.get('role', '') or j.get('position', '') or ''
         )
-        company_norm = re.sub(r'[^a-z0-9]', '', company_raw.lower())[:20]
-        title_norm = re.sub(r'[^a-z0-9]', '', title_raw.lower())[:20]
 
-        # Key on company alone — one entry per company
-        # (most people have one role per company in their resume)
-        dedup_key = company_norm if company_norm else f"{title_norm}_{company_norm}"
+        # Normalize company for dedup — strip URLs, punctuation, extract core name
+        company_cleaned = re.sub(r'https?://\S+', '', company_raw)
+        company_cleaned = re.sub(r'[,;]\s*\w+$', '', company_cleaned)  # remove trailing city
+        company_norm = re.sub(r'[^a-z0-9]', '', company_cleaned.lower())[:20]
 
-        if dedup_key in seen_work_keys:
-            # Keep the entry with more data (higher duration)
-            for idx, existing in enumerate(final_work):
-                existing_company = re.sub(
-                    r'[^a-z0-9]', '',
-                    (existing.get('company', '') or '').lower()
-                )[:20]
-                if existing_company == company_norm:
-                    # Keep whichever has higher duration_years
-                    existing_dur = existing.get('duration_years', 0) or 0
-                    new_dur = j.get('duration_years', 0) or 0
-                    try:
-                        existing_dur = float(existing_dur)
-                        new_dur = float(new_dur)
-                    except (ValueError, TypeError):
-                        existing_dur = 0
-                        new_dur = 0
-                    if new_dur > existing_dur:
-                        final_work[idx] = j
-                    break
+        if not company_norm:
+            company_norm = re.sub(r'[^a-z0-9]', '', title_raw.lower())[:20]
+
+        if not company_norm:
+            final_work.append(j)
+            continue
+
+        # Get duration of this entry
+        new_dur = j.get('duration_years', 0) or 0
+        try:
+            new_dur = float(new_dur)
+        except (ValueError, TypeError):
+            new_dur = 0
+
+        # Also consider: does this entry have dates? (better than one without)
+        has_dates = bool(
+            j.get('start_date', j.get('from', ''))
+            and j.get('end_date', j.get('to', ''))
+        )
+        new_quality = new_dur + (0.5 if has_dates else 0)
+
+        if company_norm in seen_companies:
+            # Already have an entry for this company — keep better one
+            existing_idx = seen_companies[company_norm]
+            existing = final_work[existing_idx]
+
+            existing_dur = existing.get('duration_years', 0) or 0
+            try:
+                existing_dur = float(existing_dur)
+            except (ValueError, TypeError):
+                existing_dur = 0
+
+            existing_has_dates = bool(
+                existing.get('start_date', existing.get('from', ''))
+                and existing.get('end_date', existing.get('to', ''))
+            )
+            existing_quality = existing_dur + (0.5 if existing_has_dates else 0)
+
+            if new_quality > existing_quality:
+                final_work[existing_idx] = j
         else:
-            seen_work_keys.add(dedup_key)
+            seen_companies[company_norm] = len(final_work)
             final_work.append(j)
 
     parsed["work_history"] = final_work
