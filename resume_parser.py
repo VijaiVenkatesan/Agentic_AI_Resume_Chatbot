@@ -1469,6 +1469,119 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
         except (ValueError, TypeError):
             pass
     parsed["total_experience_years"] = round(total_exp, 1)
+                              
+    # 7e: If STILL 0 experience, try to extract from profile/summary text
+    # Handles resumes that say "3+ years of experience" without specific dates
+    if parsed.get("total_experience_years", 0) == 0:
+        summary_text = (
+            parsed.get("professional_summary", "")
+            or parsed.get("summary", "")
+            or ""
+        )
+        # Also check full resume text
+        texts_to_check = [summary_text, resume_text[:3000]]
+        
+        for check_text in texts_to_check:
+            if not check_text:
+                continue
+            check_lower = check_text.lower()
+            
+            # Patterns: "3+ years", "3 years of experience", "over 5 years"
+            exp_patterns = [
+                r'(\d+)\s*\+\s*years?\s*(?:of\s*)?(?:experience|exp)',
+                r'(\d+)\s*(?:\+\s*)?years?\s*(?:of\s*)?(?:experience|exp)',
+                r'over\s+(\d+)\s*years?\s*(?:of\s*)?(?:experience|exp)',
+                r'more\s+than\s+(\d+)\s*years?\s*(?:of\s*)?(?:experience|exp)',
+                r'(\d+)\s*(?:\+\s*)?years?\s*(?:of\s*)?(?:industry|work|professional)',
+                r'(\d+)\s*(?:\+\s*)?(?:yrs?|years?)\s*(?:of\s*)?(?:experience|exp)',
+                r'experience\s*(?:of\s*)?(\d+)\s*\+?\s*years?',
+            ]
+            
+            for pattern in exp_patterns:
+                match = re.search(pattern, check_lower)
+                if match:
+                    years = int(match.group(1))
+                    if 1 <= years <= 40:
+                        parsed["total_experience_years"] = float(years)
+                        break
+            
+            if parsed.get("total_experience_years", 0) > 0:
+                break
+    
+    # 7f: If we have "CURRENTLY WORKING" but no work_history entries,
+    # try to create one from the profile/header text
+    if not parsed.get("work_history"):
+        currently_patterns = [
+            r'currently\s+working\s+(?:as\s+)?(?:a\s+)?[\'"]?(.+?)[\'"]?\s+(?:for|with|at|in)\s+(.+?)(?:\.|$|\n)',
+            r'currently\s+working\s+(?:as\s+)?(?:a\s+)?[\'"]?(.+?)[\'"]?\s+(?:for|with|at|in)\s+(?:client\s+)?(.+?)(?:\.|$|\n)',
+            r'working\s+(?:as\s+)?(?:a\s+)?[\'"]?(.+?)[\'"]?\s+(?:for|with|at|in)\s+(.+?)(?:\.|$|\n)',
+        ]
+        
+        for pattern in currently_patterns:
+            match = re.search(pattern, resume_text, re.IGNORECASE)
+            if match:
+                role = match.group(1).strip().rstrip('\'\"')
+                company = match.group(2).strip().rstrip('.,;')
+                company = re.sub(r'https?://\S+', '', company).strip()
+                
+                if _is_valid_work_entry({"title": role, "company": company}):
+                    exp_years = parsed.get("total_experience_years", 0)
+                    parsed["work_history"] = [{
+                        "title": role,
+                        "company": company,
+                        "location": "",
+                        "start_date": "",
+                        "end_date": "Present",
+                        "duration_years": exp_years if exp_years > 0 else 0,
+                        "type": "Full-time",
+                        "description": "",
+                        "key_achievements": [],
+                        "technologies_used": []
+                    }]
+                    break
+        
+        # Also check header line for "Role, Company" pattern
+        if not parsed.get("work_history"):
+            header_lines = resume_text.strip().split('\n')[:5]
+            for line in header_lines:
+                line = line.strip()
+                # "Python Developer, IBM - Pune" or "Python Developer at Google"
+                role_company = re.match(
+                    r'^(.+?)\s*[,\-–—|]\s*(.+?)(?:\s*[,\-–—|]\s*.+)?$', line
+                )
+                if role_company:
+                    role = role_company.group(1).strip()
+                    company = role_company.group(2).strip()
+                    company = re.sub(r'https?://\S+', '', company).strip().rstrip('-,. ')
+                    
+                    # Must look like a role (contains "developer", "engineer", etc.)
+                    role_keywords = [
+                        'developer', 'engineer', 'analyst', 'scientist', 'manager',
+                        'designer', 'architect', 'consultant', 'lead', 'specialist',
+                        'administrator', 'coordinator', 'executive', 'officer',
+                    ]
+                    if any(kw in role.lower() for kw in role_keywords):
+                        if _is_valid_work_entry({"title": role, "company": company}):
+                            exp_years = parsed.get("total_experience_years", 0)
+                            parsed["work_history"] = [{
+                                "title": role,
+                                "company": company,
+                                "location": "",
+                                "start_date": "",
+                                "end_date": "Present",
+                                "duration_years": exp_years if exp_years > 0 else 0,
+                                "type": "Full-time",
+                                "description": "",
+                                "key_achievements": [],
+                                "technologies_used": []
+                            }]
+                            
+                            # Update current role/company
+                            if not parsed.get("current_role"):
+                                parsed["current_role"] = role
+                            if not parsed.get("current_company"):
+                                parsed["current_company"] = company
+                            break
 
     # STEP 8: Current role/company
     if not parsed.get("current_role") or not parsed.get("current_company"):
