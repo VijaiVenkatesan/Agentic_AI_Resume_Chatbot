@@ -1,9 +1,11 @@
 """
-Enhanced Resume Parser V8
+Enhanced Resume Parser V9
 - Triple extraction: Document Processor + Regex + LLM
 - Enhanced name extraction: 8 strategies including Regards/Declaration sections
 - Enhanced education validation + cross-validation against resume text
-- Paragraph-format work experience extraction with ALL date formats
+- FIXED: Structured resume format parsing (multi-line role/company/date blocks)
+- FIXED: Section-aware extraction — only extracts from WORK EXPERIENCE section
+- FIXED: Prevents date ranges from education/certs/awards leaking into work history
 - Independent experience calculation — NEVER trusts LLM totals
 - Work entry validation — rejects garbage role/company names
 - Spaced-out text detection
@@ -100,6 +102,26 @@ PRESENT_WORDS: Set[str] = {
     'till date', 'till now', 'to date', 'today', 'continuing',
 }
 
+# Section headers that signal END of work experience section
+_NON_WORK_SECTION_HEADERS: Set[str] = {
+    'education', 'skills', 'certifications', 'certification',
+    'awards', 'scholarships', 'awards & scholarships',
+    'projects', 'publications', 'volunteer', 'languages',
+    'interests', 'hobbies', 'references', 'declaration',
+    'training', 'courses', 'accomplishments',
+    'technical skills', 'professional skills',
+    'academic details', 'academic qualifications',
+    'personal details', 'personal information',
+}
+
+# Section headers that signal START of work experience section
+_WORK_SECTION_HEADERS: Set[str] = {
+    'work experience', 'experience', 'professional experience',
+    'employment history', 'employment', 'work history',
+    'career history', 'professional background',
+    'relevant experience', 'industry experience',
+}
+
 # ═══════════════════════════════════════════════════════════════
 #                    LLM PARSING PROMPT
 # ═══════════════════════════════════════════════════════════════
@@ -141,8 +163,8 @@ Extract ALL information into this exact JSON structure (no markdown, no code blo
             "title": "exact job title",
             "company": "company name",
             "location": "location",
-            "start_date": "Month Year",
-            "end_date": "Month Year or Present",
+            "start_date": "Month Year or MM/YYYY",
+            "end_date": "Month Year or MM/YYYY or Present",
             "duration_years": 0.0,
             "type": "Full-time/Internship/Contract/Part-time/Freelance",
             "description": "role description",
@@ -205,6 +227,8 @@ CRITICAL RULES:
 6. duration_years: Calculate as decimal from dates. 2 years 6 months = 2.5.
 7. total_experience_years: Sum of all duration_years.
 8. SKILLS: Extract EVERY skill mentioned ANYWHERE.
+9. WORK HISTORY: Only include entries from the WORK EXPERIENCE section.
+   DO NOT include education, certifications, or awards as work entries.
 
 Return ONLY valid JSON."""
 
@@ -584,35 +608,25 @@ def _extract_contacts_regex(text: str) -> Dict:
         m = re.search(p, text, re.IGNORECASE)
         if m:
             email = m.group(0).strip()
-            # Remove label prefix
             email = re.sub(r'^(?:email|e-mail|mail)[\s.:]*', '', email, flags=re.IGNORECASE)
-            # Remove spaces
             email = re.sub(r'\s+', '', email)
-            # Fix [at] / (at)
             email = re.sub(r'\[\s*at\s*\]|\(\s*at\s*\)', '@', email, flags=re.IGNORECASE)
 
-            # Fix: remove leading PIN/ZIP codes that get merged with email
-            # e.g. "411046.sanketrg1997@gmail.com" → "sanketrg1997@gmail.com"
             if '@' in email:
                 local_part = email.split('@')[0]
                 pin_match = re.match(r'^(\d{4,7})[.\-_]', local_part)
                 if pin_match:
                     email = email[len(pin_match.group(1)) + 1:]
 
-                # Also handle: "411046sanketrg1997@gmail.com" (no separator)
-                # If local part starts with 5-6 digits followed by letters
                 if not pin_match:
                     local_part = email.split('@')[0]
                     digit_prefix = re.match(r'^(\d{5,7})([a-zA-Z])', local_part)
                     if digit_prefix:
                         email = local_part[len(digit_prefix.group(1)):] + '@' + email.split('@')[1]
 
-            # Final validation
             if '@' in email and '.' in email.split('@')[-1]:
                 final_local = email.split('@')[0]
-                # Local part must have at least one letter
                 if any(c.isalpha() for c in final_local):
-                    # Reject if local part is too short (single char)
                     if len(final_local) >= 2:
                         contacts["email"] = email
                         break
@@ -683,13 +697,11 @@ def _extract_contacts_regex(text: str) -> Dict:
                 r'^(?:portfolio|website|web|site|blog)[\s.:]+',
                 '', match, flags=re.IGNORECASE
             ).strip()
-            # Skip linkedin, github, and email-like patterns
             url_lower = url.lower()
             if ('linkedin' not in url_lower
                     and 'github' not in url_lower
                     and '@' not in url
-                    and 'ibm.com' not in url_lower  # Skip employer URLs in header
-                    ):
+                    and 'ibm.com' not in url_lower):
                 contacts["portfolio"] = url
                 break
         if contacts["portfolio"]:
@@ -697,14 +709,10 @@ def _extract_contacts_regex(text: str) -> Dict:
 
     # ═══════ ADDRESS ═══════
     address_patterns = [
-        # Labeled address
         r'(?:Address|Location|Residence|Home|Addr)[\s.:]+([^\n]{15,150})',
-        # With PIN/ZIP codes
         r'(?:No[.:]?\s*)?[\d]+[,\s]+[\w\s]+(?:Street|St|Road|Rd|Avenue|Ave|Nagar|Colony|'
         r'Layout|Block|Lane|Apt|Apartment|Floor|Fl|Building|Bldg|Society|Housing)[\w\s,.-]+(?:\d{5,6})',
-        # City, State, PIN pattern
         r'[\w\s]+,\s*[\w\s]+,\s*[\w\s]+-?\s*\d{5,6}',
-        # Housing society patterns (common in Indian addresses)
         r'[\'"\u2018\u2019]?[\w\s]+(?:Society|Housing|Apartment|Complex|Residency)[\w\s,.-]+\d{5,6}',
     ]
     for p in address_patterns:
@@ -715,7 +723,6 @@ def _extract_contacts_regex(text: str) -> Dict:
                 r'^(?:Address|Location|Residence|Home|Addr)[\s.:]+',
                 '', addr, flags=re.IGNORECASE
             ).strip()
-            # Clean leading quotes/apostrophes
             addr = addr.lstrip("'\"\u2018\u2019")
             if 15 < len(addr) < 200:
                 contacts["address"] = addr
@@ -727,7 +734,7 @@ def _extract_contacts_regex(text: str) -> Dict:
         r'\b(Bangalore|Bengaluru|Mumbai|Delhi|NCR|Chennai|Hyderabad|Pune|Kolkata|'
         r'Noida|Gurgaon|Gurugram|Ahmedabad|Jaipur|Lucknow|Chandigarh|Indore|Bhopal|'
         r'Kochi|Coimbatore|Trivandrum|Mysore|Nagpur|Surat|Vadodara|Bhubaneswar|'
-        r'Patna|Ranchi|Guwahati|Visakhapatnam|Vijayawada|Kolhapur)\b',
+        r'Patna|Ranchi|Guwahati|Visakhapatnam|Vijayawada|Kolhapur|Pondicherry)\b',
         r'\b(New York|NYC|San Francisco|SF|Los Angeles|LA|Chicago|Seattle|Boston|'
         r'Austin|Denver|Atlanta|Dallas|Houston|Phoenix|San Diego|San Jose|Portland|'
         r'Miami|Washington DC|Philadelphia)\b',
@@ -925,24 +932,84 @@ def _clean_name(name: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════
-#        WORK EXPERIENCE EXTRACTION
+#        SECTION EXTRACTION HELPER
+# ═══════════════════════════════════════════════════════════════
+
+def _extract_work_section(text: str) -> str:
+    """Extract ONLY the work experience section from resume text.
+    
+    This prevents dates from education, certifications, and awards
+    from being incorrectly parsed as work experience.
+    """
+    if not text:
+        return ""
+
+    lines = text.split('\n')
+    work_start = -1
+    work_end = len(lines)
+
+    # Find work experience section start
+    for i, line in enumerate(lines):
+        stripped = line.strip().lower()
+        # Remove common formatting characters
+        cleaned = re.sub(r'[^a-z\s]', '', stripped).strip()
+        if cleaned in _WORK_SECTION_HEADERS or any(cleaned.startswith(h) for h in _WORK_SECTION_HEADERS):
+            work_start = i + 1  # Start after the header line
+            break
+
+    if work_start == -1:
+        # No explicit work section header found — return empty
+        # (will rely on LLM or narrative patterns applied to full text)
+        return ""
+
+    # Find where work section ends (next non-work section header)
+    for i in range(work_start, len(lines)):
+        stripped = lines[i].strip().lower()
+        cleaned = re.sub(r'[^a-z\s&]', '', stripped).strip()
+        if cleaned in _NON_WORK_SECTION_HEADERS or any(cleaned.startswith(h) for h in _NON_WORK_SECTION_HEADERS):
+            work_end = i
+            break
+
+    work_text = '\n'.join(lines[work_start:work_end])
+    return work_text.strip()
+
+
+# ═══════════════════════════════════════════════════════════════
+#        WORK EXPERIENCE EXTRACTION (FIXED)
 # ═══════════════════════════════════════════════════════════════
 
 def _extract_work_experience_from_text(text: str) -> List[Dict]:
+    """Extract work experience entries from resume text.
+    
+    FIXED in V9:
+    - First extracts the WORK EXPERIENCE section to avoid date leaks
+    - Handles structured multi-line format:
+        Role • Type
+        Company • Location • MM/YYYY - MM/YYYY
+      OR:
+        Role • Type
+        Company • Location
+        MM/YYYY - MM/YYYY
+    - Narrative patterns only applied to full text as last resort
+    - Fallback pattern 6 is section-aware and much more conservative
+    """
     if not text:
         return []
+
     work_entries: List[Dict] = []
     seen_jobs: Set[str] = set()
 
+    # ── Date building blocks ──
     MY = (r'(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|'
           r'Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)[.,]?\s*\d{4}')
     ND = r'\d{1,2}[/\-\.]\d{4}'
     NDR = r'\d{4}[/\-\.]\d{1,2}'
     MA = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)['\u2019]\s*\d{2,4}"
-    PK = r'(?:present|current(?:ly)?|now|ongoing|till\s*date|till\s*now|to\s*date|today|continuing)'
-    JY = r'\d{4}'
+    PK = r'(?:[Pp]resent|[Cc]urrent(?:ly)?|[Nn]ow|[Oo]ngoing|[Tt]ill\s*[Dd]ate|[Tt]ill\s*[Nn]ow|[Tt]o\s*[Dd]ate|[Tt]oday|[Cc]ontinuing)'
+    JY = r'(?:19|20)\d{2}'
     AD = f'(?:{MY}|{ND}|{NDR}|{MA}|{PK}|{JY})'
     DS = r'\s*(?:to|till|until|[-\u2013\u2014])\s*'
+    DATE_RANGE = rf'({AD})\s*(?:to|till|until|[-\u2013\u2014])\s*({AD})'
 
     def _cco(c):
         c = re.sub(r'https?://\S+', '', c).strip()
@@ -952,7 +1019,7 @@ def _extract_work_experience_from_text(text: str) -> List[Dict]:
     def _nk(r, c):
         return f"{re.sub(r'[^a-z0-9]', '', r.lower())[:25]}_{re.sub(r'[^a-z0-9]', '', c.lower())[:25]}"
 
-    def _add(role, company, start, end, loc=""):
+    def _add(role, company, start, end, loc="", emp_type="Full-time", description=""):
         role = role.strip().rstrip(',. ')
         company = _cco(company)
         end = re.sub(r'https?://\S+', '', end).strip().rstrip('.,;: ')
@@ -964,99 +1031,265 @@ def _extract_work_experience_from_text(text: str) -> List[Dict]:
         seen_jobs.add(key)
         dur = _calc_duration_from_dates(start, end)
         ce = end.strip() if end.strip() and end.strip().lower() not in ['', '-', '\u2013', '\u2014'] else "Present"
-        work_entries.append({"title": role, "company": company, "location": loc,
-                             "start_date": start.strip(), "end_date": ce, "duration_years": dur,
-                             "type": "Full-time", "description": "", "key_achievements": [], "technologies_used": []})
+        work_entries.append({
+            "title": role, "company": company, "location": loc,
+            "start_date": start.strip(), "end_date": ce, "duration_years": dur,
+            "type": emp_type, "description": description,
+            "key_achievements": [], "technologies_used": []
+        })
 
-    # Pattern 1
-    for m in re.finditer(
-        r'(?:currently\s+)?(?:working|employed|serving)\s+(?:as\s+)?(.+?)\s+(?:with|at|in|for)\s+(.+?)\s*'
-        rf'(?:since|from)\s+({AD}){DS}({AD})(?:\s*[.\n]|$)', text, re.IGNORECASE):
-        _add(m.group(1), m.group(2), m.group(3), m.group(4))
+    # ══════════════════════════════════════════════════════
+    # PHASE 1: Structured format parsing (section-aware)
+    # ══════════════════════════════════════════════════════
+    work_section = _extract_work_section(text)
 
-    # Pattern 2a
-    for m in re.finditer(
-        r'(?:ex|former|previous|past)\s+(?:employee|member|associate|consultant|staff)\s+(?:of|at|with|in)\s+(.+?)'
-        rf'\s+from\s+({AD}){DS}({AD})\s+as\s+(.+?)(?:\s*[.\n;]|$)', text, re.IGNORECASE):
-        cr = m.group(1).strip()
-        cc = _cco(cr)
-        role = m.group(4).strip().rstrip('.,;: ')
-        loc = ""
-        lm = re.search(r'[,;]\s*(\w[\w\s]*?)$', re.sub(r'https?://\S+', '', cr))
-        if lm:
-            loc = lm.group(1).strip()
-        if not _is_valid_work_entry({"title": role, "company": cc}):
-            continue
-        key = _nk(role, cc)
-        if key in seen_jobs:
-            continue
-        seen_jobs.add(key)
-        dur = _calc_duration_from_dates(m.group(2).strip(), m.group(3).strip())
-        work_entries.append({"title": role, "company": cc, "location": loc,
-                             "start_date": m.group(2).strip(), "end_date": m.group(3).strip(),
-                             "duration_years": dur, "type": "Full-time", "description": "",
-                             "key_achievements": [], "technologies_used": []})
+    if work_section:
+        # ── Pattern A: Multi-line structured blocks ──
+        # Handles formats like:
+        #   Role Title • Full-time
+        #   Company Name • Location • MM/YYYY - MM/YYYY
+        # OR:
+        #   Role Title • Full-time
+        #   Company Name • Location
+        #   MM/YYYY - Present
+        
+        ws_lines = work_section.split('\n')
+        i = 0
+        while i < len(ws_lines):
+            line = ws_lines[i].strip()
+            if not line:
+                i += 1
+                continue
 
-    # Pattern 2b
-    for m in re.finditer(
-        r'(?:ex|former|previous|past)\s+(?:employee|member|associate|consultant|staff)\s+(?:of|at|with|in)\s+(.+?)'
-        r'\s+(?:from)\s+(.+?)\s+(?:to|till|until)\s+(.+?)\s+(?:as)\s+(.+?)(?:\s*[.\n;,]|$)', text, re.IGNORECASE):
-        cc = _cco(m.group(1).strip())
-        cn = re.sub(r'[^a-z0-9]', '', cc.lower())[:20]
-        if any(re.sub(r'[^a-z0-9]', '', e.get('company', '').lower())[:20] == cn for e in work_entries):
-            continue
-        _add(m.group(4).strip(), cc, m.group(2).strip(), m.group(3).strip())
+            # Skip bullet points and description lines
+            if line.startswith(('•', '-', '*', '\u2022', '\u25e6', '\u2023')):
+                i += 1
+                continue
 
-    # Pattern 3
-    for m in re.finditer(
-        r'(?:worked|employed|served|joined|was)\s+(?:as\s+)?(.+?)\s+(?:at|with|in|for)\s+(.+?)\s*'
-        rf'(?:from|since)\s+({AD}){DS}({AD})(?:[.\n,;]|$)', text, re.IGNORECASE):
-        _add(m.group(1), m.group(2), m.group(3), m.group(4))
+            # Try to detect a role line (contains job title keywords or bullet separator)
+            # A role line typically: "Role Title • Type" or "Role Title"
+            role_match = re.match(
+                r'^(.+?(?:Developer|Engineer|Analyst|Scientist|Manager|Designer|Architect|'
+                r'Consultant|Lead|Specialist|Administrator|Coordinator|Executive|Officer|'
+                r'Intern|Trainee|Associate|Director|Head|VP|President|Summarizer|'
+                r'Record\s+Analyst|Data\s+Science).*?)$',
+                line, re.IGNORECASE
+            )
 
-    # Pattern 4: tabular
-    for m in re.finditer(
-        rf'^(.+?)\s+(?:at|with|@)\s+(.+?)\s*[,|]\s*({AD}){DS}({AD})(?:\s*[.\n]|$)',
-        text, re.IGNORECASE | re.MULTILINE):
-        r, c = m.group(1).strip(), m.group(2).strip()
-        if len(r) > 60 or len(c) > 80:
-            continue
-        if any(s in r.lower() for s in ['education', 'project', 'skill', 'certification', 'award', 'summary']):
-            continue
-        _add(r, c, m.group(3), m.group(4))
+            if not role_match:
+                # Also try: line has bullet separator and looks like "Title • Type"
+                if re.match(r'^[^•\n]+\s*[\u2022•]\s*(?:Full-time|Part-time|Internship|Contract|Freelance|Temporary)',
+                            line, re.IGNORECASE):
+                    role_match = re.match(r'^(.+)$', line)
 
-    # Pattern 5: pipe
-    for m in re.finditer(
-        rf'(.+?)\s*\|\s*(.+?)\s*\|\s*({AD}){DS}({AD})(?:\s*[.\n]|$)', text, re.IGNORECASE):
-        c, r = m.group(1).strip(), m.group(2).strip()
-        if len(r) > 60 or len(c) > 80:
-            continue
-        _add(r, c, m.group(3), m.group(4))
+            if not role_match:
+                i += 1
+                continue
 
-    # Pattern 6: fallback date ranges
+            role_line = role_match.group(1).strip()
+
+            # Extract employment type from role line
+            emp_type = "Full-time"
+            type_match = re.search(
+                r'[\u2022•\-|,]\s*(Full-time|Part-time|Internship|Contract|Freelance|Temporary)\s*$',
+                role_line, re.IGNORECASE
+            )
+            if type_match:
+                emp_type = type_match.group(1).strip()
+                role_line = role_line[:type_match.start()].strip().rstrip('•\u2022-|, ')
+
+            # Check if this line itself contains a date range (single-line format)
+            inline_date = re.search(DATE_RANGE, role_line)
+            if inline_date:
+                # Remove date from role
+                role_line = role_line[:inline_date.start()].strip().rstrip('•\u2022-|, ')
+
+            # Now look ahead for company line and/or date line
+            company = ""
+            location = ""
+            start_date = ""
+            end_date = ""
+
+            if inline_date:
+                start_date = inline_date.group(1)
+                end_date = inline_date.group(2)
+
+            # Look at next lines for company and dates
+            lookahead_limit = min(i + 4, len(ws_lines))
+            j = i + 1
+            while j < lookahead_limit:
+                next_line = ws_lines[j].strip()
+                if not next_line:
+                    j += 1
+                    continue
+
+                # Skip bullet points
+                if next_line.startswith(('•', '-', '*', '\u2022', '\u25e6', '\u2023')):
+                    break  # Hit description section, stop looking
+
+                # Check if this line is a date range line
+                date_match = re.match(rf'^\s*({AD})\s*(?:to|till|until|[-\u2013\u2014])\s*({AD})\s*$', next_line, re.IGNORECASE)
+                if date_match:
+                    if not start_date:
+                        start_date = date_match.group(1)
+                        end_date = date_match.group(2)
+                    j += 1
+                    continue
+
+                # Check if this line is a company line (may contain dates too)
+                # Company lines look like: "Company Name • Location • MM/YYYY - MM/YYYY"
+                # or: "Company Name • Location"
+                company_with_date = re.match(
+                    rf'^(.+?)\s*[\u2022•]\s*({AD})\s*(?:to|till|until|[-\u2013\u2014])\s*({AD})\s*$',
+                    next_line, re.IGNORECASE
+                )
+                if company_with_date:
+                    company_loc = company_with_date.group(1).strip()
+                    if not start_date:
+                        start_date = company_with_date.group(2)
+                        end_date = company_with_date.group(3)
+                    # Split company • location
+                    cl_parts = re.split(r'\s*[\u2022•]\s*', company_loc)
+                    company = cl_parts[0].strip() if cl_parts else company_loc
+                    if len(cl_parts) > 1:
+                        location = cl_parts[-1].strip()
+                    j += 1
+                    continue
+
+                # Check if line has date range embedded
+                line_date = re.search(DATE_RANGE, next_line)
+                if line_date:
+                    # Extract company/location from before the date
+                    pre_date = next_line[:line_date.start()].strip().rstrip('•\u2022-|, ')
+                    if pre_date and not company:
+                        cl_parts = re.split(r'\s*[\u2022•]\s*', pre_date)
+                        company = cl_parts[0].strip() if cl_parts else pre_date
+                        if len(cl_parts) > 1:
+                            location = cl_parts[-1].strip()
+                    if not start_date:
+                        start_date = line_date.group(1)
+                        end_date = line_date.group(2)
+                    j += 1
+                    continue
+
+                # Otherwise it's a company line without dates
+                if not company:
+                    # It might be "Company • Location" or just "Company"
+                    cl_parts = re.split(r'\s*[\u2022•]\s*', next_line)
+                    # Filter out employment type tokens
+                    cl_parts = [p.strip() for p in cl_parts
+                                if p.strip().lower() not in ('full-time', 'part-time', 'internship',
+                                                              'contract', 'freelance', 'temporary')]
+                    if cl_parts:
+                        company = cl_parts[0].strip()
+                        if len(cl_parts) > 1:
+                            # Last part might be location or date
+                            last_part = cl_parts[-1].strip()
+                            # Check if it's a date
+                            if re.match(rf'^{AD}$', last_part, re.IGNORECASE):
+                                pass  # skip, it's a partial date
+                            else:
+                                location = last_part
+                    j += 1
+                    continue
+
+                # If we already have company, this might be another role block
+                break
+
+            # If we found a valid entry, add it
+            if role_line and (company or start_date):
+                # Clean up company — remove location words at end if location not set
+                if company and not location:
+                    # Check for "Company • Location" pattern already split
+                    loc_match = re.search(
+                        r'[,\u2022•]\s*(Pondicherry|Chennai|Hyderabad|Bangalore|Bengaluru|Mumbai|'
+                        r'Delhi|Pune|Kolkata|Noida|Gurgaon|Gurugram|India)\s*$',
+                        company, re.IGNORECASE
+                    )
+                    if loc_match:
+                        location = loc_match.group(1).strip()
+                        company = company[:loc_match.start()].strip().rstrip(',•\u2022 ')
+
+                _add(role_line, company, start_date, end_date, location, emp_type)
+                i = j  # Jump past the lines we consumed
+            else:
+                i += 1
+
+    # ══════════════════════════════════════════════════════
+    # PHASE 2: Narrative patterns (full text) — only if structured parsing found nothing
+    # ══════════════════════════════════════════════════════
     if not work_entries:
-        for m in re.finditer(rf'(?:from\s+|since\s+)?({AD}){DS}({AD})', text, re.IGNORECASE):
+        # Pattern 1: "currently working/employed as X at Y since/from DATE to DATE"
+        for m in re.finditer(
+            r'(?:currently\s+)?(?:working|employed|serving)\s+(?:as\s+)?(.+?)\s+(?:with|at|in|for)\s+(.+?)\s*'
+            rf'(?:since|from)\s+({AD}){DS}({AD})(?:\s*[.\n]|$)', text, re.IGNORECASE):
+            _add(m.group(1), m.group(2), m.group(3), m.group(4))
+
+        # Pattern 2: "worked/employed/served as X at Y from DATE to DATE"
+        for m in re.finditer(
+            r'(?:worked|employed|served|joined|was)\s+(?:as\s+)?(.+?)\s+(?:at|with|in|for)\s+(.+?)\s*'
+            rf'(?:from|since)\s+({AD}){DS}({AD})(?:[.\n,;]|$)', text, re.IGNORECASE):
+            _add(m.group(1), m.group(2), m.group(3), m.group(4))
+
+        # Pattern 3: tabular "Role at Company, DATE - DATE"
+        for m in re.finditer(
+            rf'^(.+?)\s+(?:at|with|@)\s+(.+?)\s*[,|]\s*({AD}){DS}({AD})(?:\s*[.\n]|$)',
+            text, re.IGNORECASE | re.MULTILINE):
+            r, c = m.group(1).strip(), m.group(2).strip()
+            if len(r) > 60 or len(c) > 80:
+                continue
+            if any(s in r.lower() for s in ['education', 'project', 'skill', 'certification', 'award', 'summary']):
+                continue
+            _add(r, c, m.group(3), m.group(4))
+
+        # Pattern 4: pipe-separated "Company | Role | DATE - DATE"
+        for m in re.finditer(
+            rf'(.+?)\s*\|\s*(.+?)\s*\|\s*({AD}){DS}({AD})(?:\s*[.\n]|$)', text, re.IGNORECASE):
+            c, r = m.group(1).strip(), m.group(2).strip()
+            if len(r) > 60 or len(c) > 80:
+                continue
+            _add(r, c, m.group(3), m.group(4))
+
+    # ══════════════════════════════════════════════════════
+    # PHASE 3: Conservative fallback — ONLY within work section
+    # ══════════════════════════════════════════════════════
+    # OLD BUG: Pattern 6 scanned the ENTIRE text for date ranges,
+    # picking up education dates, certification dates, award dates, etc.
+    # FIX: Only scan within the work section, and require meaningful context.
+    if not work_entries and work_section:
+        for m in re.finditer(DATE_RANGE, work_section, re.IGNORECASE):
             ss, es = m.group(1).strip(), m.group(2).strip()
             sy, sm = _parse_date_to_ym(ss)
             if not sy or sy < 1980 or sy > CURRENT_YEAR:
                 continue
-            ctx = text[max(0, m.start() - 250):min(len(text), m.end() + 150)]
+            ctx = work_section[max(0, m.start() - 250):min(len(work_section), m.end() + 150)]
             role = company = ""
-            rm = re.search(r'(?:as|role|position|designation|title)[:\s]+(.+?)(?:\s+(?:at|with|in|from|since)|\n|,)', ctx, re.IGNORECASE)
+            rm = re.search(
+                r'(?:as|role|position|designation|title)[:\s]+(.+?)(?:\s+(?:at|with|in|from|since)|\n|,)',
+                ctx, re.IGNORECASE
+            )
             if rm:
                 role = rm.group(1).strip()
-            cm = re.search(r'(?:at|with|in|for|company|organization|employer)[:\s]+(.+?)(?:\s+(?:from|since|as)|\n|,)', ctx, re.IGNORECASE)
+            cm = re.search(
+                r'(?:at|with|in|for|company|organization|employer)[:\s]+(.+?)(?:\s+(?:from|since|as)|\n|,)',
+                ctx, re.IGNORECASE
+            )
             if cm:
                 company = _cco(cm.group(1))
             dur = _calc_duration_from_dates(ss, es)
-            if dur > 0:
+            if dur > 0 and (role or company):
                 te = {"title": role or "Not specified", "company": company or "Not specified"}
                 if _is_valid_work_entry(te):
                     key = _nk(role or "role", company or ss)
                     if key not in seen_jobs:
                         seen_jobs.add(key)
-                        work_entries.append({"title": te["title"], "company": te["company"], "location": "",
-                                             "start_date": ss, "end_date": es, "duration_years": dur,
-                                             "type": "Full-time", "description": "", "key_achievements": [], "technologies_used": []})
+                        work_entries.append({
+                            "title": te["title"], "company": te["company"], "location": "",
+                            "start_date": ss, "end_date": es, "duration_years": dur,
+                            "type": "Full-time", "description": "",
+                            "key_achievements": [], "technologies_used": []
+                        })
+
     return work_entries
 
 
@@ -1087,7 +1320,7 @@ def _extract_education_regex(text: str) -> List[Dict]:
         (r'(Polytechnic)\s*(?:in\s*)?([\w\s,&]+)?', 'D'),
         (r'(ITI|I\.?T\.?I\.?)\s*(?:in\s*)?([\w\s,&]+)?', 'D'),
         (r'(Higher\s*Secondary|HSC|12th|XII|Intermediate|Senior\s*Secondary|\+2|Plus\s*Two)', 'S'),
-        (r'(Secondary|SSC|10th|X|Matriculation|High\s*School|SSLC)', 'S'),
+        (r'(Secondary|SSC|SSLC|10th|X|Matriculation|High\s*School)', 'S'),
     ]
     inst_pats = [
         r'([A-Z][A-Za-z\s\.\']+(?:University|College|Institute|School|Academy|Polytechnic))',
@@ -1288,7 +1521,7 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
     if not resume_text or len(resume_text.strip()) < 50:
         return _basic_fallback(resume_text, {}, "", [], {})
 
-    # STEP 1
+    # STEP 1: Regex extraction
     regex_contacts = _extract_contacts_regex(resume_text)
     regex_name = _extract_name_from_text(resume_text)
     regex_education = _extract_education_regex(resume_text)
@@ -1302,7 +1535,7 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
         except ImportError:
             pass
 
-    # STEP 2: LLM
+    # STEP 2: LLM parsing
     headers = {"Authorization": f"Bearer {groq_api_key}", "Content-Type": "application/json"}
     payload = {
         "model": model_id,
@@ -1312,7 +1545,8 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
                 "Return ONLY valid JSON. No markdown. "
                 "NEVER create education from awards or company names. "
                 "NEVER use prompt template examples as real data. "
-                "Only extract what is ACTUALLY WRITTEN in the resume."
+                "Only extract what is ACTUALLY WRITTEN in the resume. "
+                "Only include WORK entries from the WORK EXPERIENCE section."
             )},
             {"role": "user", "content": PARSE_PROMPT.format(resume_text=resume_text[:12000])}
         ],
@@ -1347,18 +1581,18 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
     if not parsed:
         parsed = _basic_fallback(resume_text, regex_contacts, regex_name, regex_education, regex_skills)
 
-    # STEP 2b
+    # STEP 2b: Validate education
     el = parsed.get("education", [])
     parsed["education"] = _filter_valid_education(el if isinstance(el, list) else [el] if el else [])
     parsed["education"] = _validate_education_against_text(parsed["education"], resume_text)
 
-    # STEP 3
+    # STEP 3: Merge contacts
     mc = _merge_contacts(parsed, regex_contacts, doc_contacts)
     for f, v in mc.items():
         if v and (not parsed.get(f) or not _is_valid_field(f, parsed.get(f, ""))):
             parsed[f] = v
 
-    # STEP 4
+    # STEP 4: Name
     cn = parsed.get("name", "")
     if not cn or not _is_valid_field("name", cn):
         for c in [doc_contacts.get("name", ""), regex_name, parsed.get("name", "")]:
@@ -1368,7 +1602,7 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
         if not parsed.get("name") or not _is_valid_field("name", parsed.get("name", "")):
             parsed["name"] = "Unknown Candidate"
 
-    # STEP 5
+    # STEP 5: Education merge
     le = parsed.get("education", [])
     if not isinstance(le, list):
         le = []
@@ -1409,7 +1643,7 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
                                                 "year": "", "gpa": "", "location": "", "achievements": []}]
                         break
 
-    # STEP 6
+    # STEP 6: Skills merge
     ls = parsed.get("skills", {})
     if not isinstance(ls, dict):
         ls = {"other_tools": ls} if isinstance(ls, list) else {}
@@ -1426,24 +1660,44 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
     parsed["skills"] = ls
 
     # ══════════════════════════════════════════════════════
-    # STEP 7: Experience
+    # STEP 7: Work Experience (FIXED)
     # ══════════════════════════════════════════════════════
     work_history = parsed.get("work_history", parsed.get("experience", []))
     if not isinstance(work_history, list):
         work_history = []
     work_history = [j for j in work_history if isinstance(j, dict) and _is_valid_work_entry(j)]
-    parsed["work_history"] = work_history
 
-    # 7b: ALWAYS run regex
+    # 7b: Run regex extraction
     regex_work = _extract_work_experience_from_text(resume_text)
+
+    # 7b-FIXED: Intelligent merge — prefer higher-quality entries per company
+    # Instead of blindly extending, merge by company identity
     if regex_work:
         if not work_history:
             work_history = regex_work
         else:
-            work_history.extend(regex_work)
-        parsed["work_history"] = work_history
+            # Build a set of company keys already in LLM results
+            llm_company_keys: Set[str] = set()
+            for j in work_history:
+                co = str(j.get('company', '') or j.get('organization', '') or '').strip()
+                co_clean = re.sub(r'[^a-z0-9]', '', co.lower())[:20]
+                if co_clean:
+                    llm_company_keys.add(co_clean)
 
-    # 7c: Dedup — one per company
+            # Only add regex entries that are NOT already represented by LLM
+            for rj in regex_work:
+                co = str(rj.get('company', '') or '').strip()
+                co_clean = re.sub(r'[^a-z0-9]', '', co.lower())[:20]
+                if co_clean and co_clean not in llm_company_keys:
+                    work_history.append(rj)
+                    llm_company_keys.add(co_clean)
+                elif not co_clean:
+                    # No company — skip garbage entries
+                    pass
+
+    parsed["work_history"] = work_history
+
+    # 7c: Dedup — keep best entry per company
     final_work: List[Dict] = []
     seen_co: Dict[str, int] = {}
     for j in parsed.get("work_history", []):
@@ -1466,6 +1720,11 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
         es = str(j.get('end_date', j.get('to', '')))
         idur = _calc_duration_from_dates(ss, es) if ss else 0.0
         q = idur + (1.0 if ss and es else 0) + (0.5 if ss else 0)
+        # Bonus quality for having real role and company names
+        if ti_raw and ti_raw != "Not specified":
+            q += 2.0
+        if co_raw and co_raw != "Not specified":
+            q += 2.0
         if idur > 0:
             j["duration_years"] = idur
         if cn in seen_co:
@@ -1474,7 +1733,13 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
             exs = str(ex.get('start_date', ex.get('from', '')))
             exe = str(ex.get('end_date', ex.get('to', '')))
             exd = _calc_duration_from_dates(exs, exe) if exs else 0.0
+            ex_ti = ex.get('title', '') or ex.get('role', '') or ''
+            ex_co = ex.get('company', '') or ex.get('organization', '') or ''
             exq = exd + (1.0 if exs and exe else 0) + (0.5 if exs else 0)
+            if ex_ti and ex_ti != "Not specified":
+                exq += 2.0
+            if ex_co and ex_co != "Not specified":
+                exq += 2.0
             if q > exq:
                 final_work[ei] = j
         else:
@@ -1482,7 +1747,7 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
             final_work.append(j)
     parsed["work_history"] = final_work
 
-    # 7d: Recalculate total from dates
+    # 7d: Recalculate total experience from dates — NEVER trust LLM total
     total_exp = 0.0
     for job in final_work:
         if not isinstance(job, dict):
@@ -1513,7 +1778,8 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
                        r'over\s+(\d+)\s*years?\s*(?:of\s*)?(?:experience|exp)',
                        r'more\s+than\s+(\d+)\s*years?\s*(?:of\s*)?(?:experience|exp)',
                        r'(\d+)\s*(?:\+\s*)?years?\s*(?:of\s*)?(?:industry|work|professional)',
-                       r'experience\s*(?:of\s*)?(\d+)\s*\+?\s*years?']:
+                       r'experience\s*(?:of\s*)?(\d+)\s*\+?\s*years?',
+                       r'nearly\s+(\d+)\s*years?\s*(?:of\s*)?(?:experience|exp)']:
                 em = re.search(ep, cl)
                 if em:
                     yrs = int(em.group(1))
@@ -1563,7 +1829,6 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
                     role = cm.group(1).strip().rstrip('\'\"')
                     company = cm.group(2).strip().rstrip('.,;')
                     company = re.sub(r'https?://\S+', '', company).strip()
-                    # If company looks like project description, use header company
                     if len(company.split()) > 4 or any(w in company.lower() for w in
                             ['voice', 'message', 'routing', 'optimization', 'project', 'system']):
                         company = parsed.get("current_company", "")
@@ -1591,7 +1856,7 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
                             parsed["current_company"] = company
                         break
 
-    # STEP 8
+    # STEP 8: Current role/company
     if not parsed.get("current_role") or not parsed.get("current_company"):
         wh = parsed.get("work_history", [])
         if isinstance(wh, list) and wh and isinstance(wh[0], dict):
@@ -1600,7 +1865,7 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
             if not parsed.get("current_company"):
                 parsed["current_company"] = wh[0].get("company", "") or wh[0].get("organization", "")
 
-    # STEP 9
+    # STEP 9: Defaults
     defaults: Dict = {
         "name": "Unknown Candidate", "email": "", "phone": "", "address": "",
         "linkedin": "", "github": "", "portfolio": "", "location": "",
