@@ -969,25 +969,42 @@ def _extract_work_experience_from_text(text: str) -> List[Dict]:
             return None, None
         ds = date_str.strip().lower()
 
-        present_words = [
-            'present', 'current', 'now', 'ongoing', 'till date',
-            'till now', 'to date', 'today', 'continuing',
-        ]
-        if any(pw in ds for pw in present_words):
-            return CURRENT_YEAR, CURRENT_MONTH
+        # Remove trailing punctuation
+        ds = ds.rstrip('.,;:)')
 
+        # Check for present/current — be specific to avoid false matches
+        present_phrases = [
+            'present', 'current', 'currently', 'now', 'ongoing',
+            'till date', 'till now', 'to date', 'today', 'continuing',
+        ]
+        # Only match if the WHOLE string (or dominant part) is a present word
+        ds_words = ds.split()
+        if len(ds_words) <= 3:
+            if any(pw in ds for pw in present_phrases):
+                return CURRENT_YEAR, CURRENT_MONTH
+
+        # "Month Year" format — most common
         for mname, mnum in month_map.items():
             if mname in ds:
                 ym = re.search(r'(20\d{2}|19\d{2})', ds)
                 if ym:
                     return int(ym.group()), mnum
 
+        # "MM/YYYY" or "MM-YYYY"
         m = re.search(r'(\d{1,2})[/-]((?:19|20)\d{2})', ds)
         if m:
             month = int(m.group(1))
             if 1 <= month <= 12:
                 return int(m.group(2)), month
 
+        # "YYYY/MM" or "YYYY-MM"
+        m = re.search(r'((?:19|20)\d{2})[/-](\d{1,2})', ds)
+        if m:
+            month = int(m.group(2))
+            if 1 <= month <= 12:
+                return int(m.group(1)), month
+
+        # Just year
         ym = re.search(r'(19|20)\d{2}', ds)
         if ym:
             return int(ym.group()), 6
@@ -996,21 +1013,30 @@ def _extract_work_experience_from_text(text: str) -> List[Dict]:
 
     def _calc_dur(sy, sm, ey, em):
         if not sy:
-            return 0
+            return 0.0
         if not ey:
             ey, em = CURRENT_YEAR, CURRENT_MONTH
-        months = (ey - sy) * 12 + ((em or 6) - (sm or 6))
+        sm = sm or 6
+        em = em or 6
+        months = (ey - sy) * 12 + (em - sm)
         return round(max(0, months / 12.0), 1)
 
     def _clean_company(company: str) -> str:
         company = re.sub(r'https?://\S+', '', company).strip()
-        return company.rstrip('-,. ')
+        return company.rstrip('-,. ;:')
+
+    def _normalize_job_key(role: str, company: str) -> str:
+        """Create normalized key for job deduplication."""
+        r = re.sub(r'[^a-z0-9]', '', role.lower())[:25]
+        c = re.sub(r'[^a-z0-9]', '', company.lower())[:25]
+        return f"{r}_{c}"
 
     def _add_entry(role, company, start_str, end_str):
+        role = role.strip().rstrip(',. ')
         company = _clean_company(company)
-        end_str = re.sub(r'https?://\S+', '', end_str).strip().rstrip('.,;')
+        end_str = re.sub(r'https?://\S+', '', end_str).strip().rstrip('.,;: ')
 
-        job_key = f"{role[:20]}_{company[:20]}".lower()
+        job_key = _normalize_job_key(role, company)
         if job_key in seen_jobs:
             return
         seen_jobs.add(job_key)
@@ -1019,12 +1045,18 @@ def _extract_work_experience_from_text(text: str) -> List[Dict]:
         ey, em = _parse_work_date(end_str)
         dur_years = _calc_dur(sy, sm, ey, em)
 
+        # Build clean date strings
+        clean_start = start_str.strip()
+        clean_end = end_str.strip()
+        if not clean_end or clean_end.lower() in ['', '-', '–']:
+            clean_end = "Present"
+
         work_entries.append({
-            "title": role.strip().rstrip(','),
+            "title": role,
             "company": company,
             "location": "",
-            "start_date": start_str.strip(),
-            "end_date": end_str.strip(),
+            "start_date": clean_start,
+            "end_date": clean_end,
             "duration_years": dur_years,
             "type": "Full-time",
             "description": "",
@@ -1032,26 +1064,60 @@ def _extract_work_experience_from_text(text: str) -> List[Dict]:
             "technologies_used": []
         })
 
-    # Pattern 1: "working as ROLE with/at COMPANY since DATE to DATE"
+    # ════════════════════════════════════════════
+    # Pattern 1: "working as ROLE with COMPANY since DATE to DATE"
+    # ════════════════════════════════════════════
     for m in re.finditer(
         r'(?:currently\s+)?(?:working|employed|serving)\s+(?:as\s+)?'
-        r'(.+?)\s+(?:with|at|in|for)\s+(.+?)\s*'
-        r'(?:since|from)\s+(.+?)\s+(?:to|till|until|-|–)\s+(.+?)(?:[.\n,;]|$)',
+        r'(.+?)\s+(?:with|at|in|for)\s+'
+        r'(.+?)\s*'
+        r'(?:since|from)\s+'
+        r'(.+?)\s+'
+        r'(?:to|till|until|-|–)\s+'
+        r'(.+?)(?:\s*[.\n]|$)',
         text, re.IGNORECASE
     ):
         _add_entry(m.group(1), m.group(2), m.group(3), m.group(4))
 
-    # Pattern 2: "Ex Employee of COMPANY from DATE to DATE as ROLE"
+    # ════════════════════════════════════════════
+    # Pattern 2: "Ex Employee of COMPANY ...from DATE to DATE as ROLE"
+    # Split into sub-patterns for robustness
+    # ════════════════════════════════════════════
+
+    # 2a: "Ex Employee of COMPANY URL, LOCATION from DATE to DATE as ROLE."
     for m in re.finditer(
-        r'(?:ex|former|previous|past)\s+(?:employee|member|associate|consultant)\s+'
-        r'(?:of|at|with|in)\s+(.+?)\s*'
-        r'(?:from)\s+(.+?)\s+(?:to|till|until|-|–)\s+(.+?)\s+'
-        r'(?:as|role|position|designation)?\s*(.+?)(?:[.\n,;]|$)',
+        r'(?:ex|former|previous|past)\s+'
+        r'(?:employee|member|associate|consultant)\s+'
+        r'(?:of|at|with|in)\s+'
+        r'(.+?)'                            # company (greedy but stops at from)
+        r'\s+from\s+'
+        r'(\w+\s+\d{4})'                    # start date: "October 2019"
+        r'\s+to\s+'
+        r'(\w+\s+\d{4})'                    # end date: "February 2023"
+        r'\s+as\s+'
+        r'(.+?)'                            # role
+        r'(?:\s*[.\n;]|$)',
         text, re.IGNORECASE
     ):
         _add_entry(m.group(4), m.group(1), m.group(2), m.group(3))
 
+    # 2b: Looser version — "Ex Employee of COMPANY from DATE to DATE as ROLE"
+    if not any(e.get("company", "").lower().startswith("tech") for e in work_entries):
+        for m in re.finditer(
+            r'(?:ex|former|previous|past)\s+'
+            r'(?:employee|member|associate|consultant)\s+'
+            r'(?:of|at|with|in)\s+'
+            r'(.+?)\s+'
+            r'(?:from)\s+(.+?)\s+'
+            r'(?:to|till|until)\s+(.+?)\s+'
+            r'(?:as)\s+(.+?)(?:\s*[.\n;,]|$)',
+            text, re.IGNORECASE
+        ):
+            _add_entry(m.group(4), m.group(1), m.group(2), m.group(3))
+
+    # ════════════════════════════════════════════
     # Pattern 3: "worked/joined as ROLE at COMPANY from DATE to DATE"
+    # ════════════════════════════════════════════
     for m in re.finditer(
         r'(?:worked|employed|served|joined|was)\s+(?:as\s+)?'
         r'(.+?)\s+(?:at|with|in|for)\s+(.+?)\s*'
@@ -1060,7 +1126,9 @@ def _extract_work_experience_from_text(text: str) -> List[Dict]:
     ):
         _add_entry(m.group(1), m.group(2), m.group(3), m.group(4))
 
-    # Pattern 4: Fallback — find date ranges and extract role/company from context
+    # ════════════════════════════════════════════
+    # Pattern 4: Fallback — find date ranges and extract context
+    # ════════════════════════════════════════════
     if not work_entries:
         for m in re.finditer(
             r'(?:from\s+|since\s+)?'
@@ -1081,14 +1149,16 @@ def _extract_work_experience_from_text(text: str) -> List[Dict]:
             company = ""
 
             role_match = re.search(
-                r'(?:as|role|position|designation|title)[:\s]+(.+?)(?:\s+(?:at|with|in|from|since)|\n|,)',
+                r'(?:as|role|position|designation|title)[:\s]+(.+?)'
+                r'(?:\s+(?:at|with|in|from|since)|\n|,)',
                 context, re.IGNORECASE
             )
             if role_match:
                 role = role_match.group(1).strip()
 
             company_match = re.search(
-                r'(?:at|with|in|for|company|organization|employer)[:\s]+(.+?)(?:\s+(?:from|since|as)|\n|,)',
+                r'(?:at|with|in|for|company|organization|employer)[:\s]+(.+?)'
+                r'(?:\s+(?:from|since|as)|\n|,)',
                 context, re.IGNORECASE
             )
             if company_match:
@@ -1099,7 +1169,7 @@ def _extract_work_experience_from_text(text: str) -> List[Dict]:
             dur_years = _calc_dur(sy, sm, ey, em)
 
             if dur_years > 0:
-                job_key = f"{role[:20]}_{company[:20]}_{start_str}".lower()
+                job_key = _normalize_job_key(role or "role", company or start_str)
                 if job_key not in seen_jobs:
                     seen_jobs.add(job_key)
                     work_entries.append({
@@ -1741,26 +1811,85 @@ def parse_resume_with_llm(
                 # LLM gave nothing — use regex entirely
                 parsed["work_history"] = regex_work
             else:
-                # Merge: add regex entries not already found
+                # Merge: add regex entries not already in LLM results
+                # Use normalized keys for robust dedup
                 existing_keys: Set[str] = set()
                 for j in work_history:
                     if isinstance(j, dict):
-                        key = (
-                            f"{j.get('title', '')}_{j.get('company', '')}"
-                        ).lower()[:40]
-                        existing_keys.add(key)
+                        company_raw = (
+                            j.get('company', '')
+                            or j.get('organization', '')
+                        )
+                        # Normalize: strip to alphanumeric core of company name
+                        company_norm = re.sub(r'[^a-z0-9]', '', company_raw.lower())[:20]
+                        existing_keys.add(company_norm)
+
                 for rj in regex_work:
-                    key = (
-                        f"{rj.get('title', '')}_{rj.get('company', '')}"
-                    ).lower()[:40]
-                    if key not in existing_keys:
+                    company_raw = rj.get('company', '')
+                    company_norm = re.sub(r'[^a-z0-9]', '', company_raw.lower())[:20]
+                    if company_norm and company_norm not in existing_keys:
                         work_history.append(rj)
+                        existing_keys.add(company_norm)
+                    elif not company_norm:
+                        work_history.append(rj)
+
                 parsed["work_history"] = work_history
 
             # Recalculate experience with merged data
             recalculated = _calculate_total_experience(parsed["work_history"])
             if recalculated > current_exp:
                 parsed["total_experience_years"] = recalculated
+
+    # 7c: Deduplicate work_history entries (final pass)
+    final_work: List[Dict] = []
+    seen_work_keys: Set[str] = set()
+    for j in parsed.get("work_history", []):
+        if not isinstance(j, dict):
+            continue
+        company_raw = (
+            j.get('company', '') or j.get('organization', '')
+        )
+        title_raw = (
+            j.get('title', '') or j.get('role', '') or j.get('position', '')
+        )
+        company_norm = re.sub(r'[^a-z0-9]', '', company_raw.lower())[:20]
+        title_norm = re.sub(r'[^a-z0-9]', '', title_raw.lower())[:20]
+
+        # Key on company alone — one entry per company
+        # (most people have one role per company in their resume)
+        dedup_key = company_norm if company_norm else f"{title_norm}_{company_norm}"
+
+        if dedup_key in seen_work_keys:
+            # Keep the entry with more data (higher duration)
+            for idx, existing in enumerate(final_work):
+                existing_company = re.sub(
+                    r'[^a-z0-9]', '',
+                    (existing.get('company', '') or '').lower()
+                )[:20]
+                if existing_company == company_norm:
+                    # Keep whichever has higher duration_years
+                    existing_dur = existing.get('duration_years', 0) or 0
+                    new_dur = j.get('duration_years', 0) or 0
+                    try:
+                        existing_dur = float(existing_dur)
+                        new_dur = float(new_dur)
+                    except (ValueError, TypeError):
+                        existing_dur = 0
+                        new_dur = 0
+                    if new_dur > existing_dur:
+                        final_work[idx] = j
+                    break
+        else:
+            seen_work_keys.add(dedup_key)
+            final_work.append(j)
+
+    parsed["work_history"] = final_work
+
+    # Recalculate after final dedup
+    if final_work:
+        final_exp = _calculate_total_experience(final_work)
+        if final_exp > 0:
+            parsed["total_experience_years"] = final_exp
 
     # ══════════════════════════════════════════════════════
     # STEP 8: Current role/company
