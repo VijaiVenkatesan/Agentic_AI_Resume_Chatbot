@@ -1765,35 +1765,11 @@ def parse_resume_with_llm(
 
     parsed["skills"] = llm_skills
 
-    # ══════ STEP 7: Experience — with paragraph-format fallback ══════
+    # ══════ STEP 7: Experience — independent calculation + dedup ══════
     work_history = parsed.get("work_history", parsed.get("experience", []))
     if not isinstance(work_history, list):
         work_history = []
-
-    # 7a: Calculate from LLM-parsed work history
-    if work_history:
-        calculated = _calculate_total_experience(work_history)
-        if calculated > 0:
-            parsed["total_experience_years"] = calculated
-        parsed["work_history"] = work_history
-
-    # 7a-sanity: Detect and fix hallucinated experience totals
-    # LLM sometimes returns inflated total_experience_years that doesn't
-    # match the actual work_history entries — cap it to reality
-    llm_total = parsed.get("total_experience_years", 0)
-    try:
-        llm_total = float(llm_total)
-    except (ValueError, TypeError):
-        llm_total = 0
-
-    if work_history:
-        calculated_from_entries = _calculate_total_experience(work_history)
-        if calculated_from_entries > 0:
-            # If LLM total is 1.5x+ the calculated total, it's hallucinated
-            if llm_total > calculated_from_entries * 1.5:
-                parsed["total_experience_years"] = calculated_from_entries
-            elif llm_total == 0:
-                parsed["total_experience_years"] = calculated_from_entries
+    parsed["work_history"] = work_history
 
     # 7b: ALWAYS try regex extraction for paragraph-format entries
     regex_work = _extract_work_experience_from_text(resume_text)
@@ -1820,8 +1796,6 @@ def parse_resume_with_llm(
         company_cleaned = re.sub(r'\s*[-\u2013\u2014]\s*$', '', company_cleaned)
         company_cleaned = company_cleaned.strip()
 
-        # Normalize: strip location words for better matching
-        # "Deloitte, Bengaluru" and "Deloitte" should match as same company
         company_words = re.sub(r'[^a-z0-9\s]', '', company_cleaned.lower()).split()
         location_words = {
             'bangalore', 'bengaluru', 'mumbai', 'delhi', 'chennai', 'hyderabad',
@@ -1839,47 +1813,141 @@ def parse_resume_with_llm(
             final_work.append(j)
             continue
 
-        new_dur = 0.0
-        try:
-            new_dur = float(j.get('duration_years', 0) or 0)
-        except (ValueError, TypeError):
-            pass
+        # Score entry quality using DATES not duration_years
+        # (LLM often hallucinates duration_years)
+        has_start = bool(j.get('start_date', j.get('from', '')))
+        has_end = bool(j.get('end_date', j.get('to', '')))
+        has_dates = has_start and has_end
 
-        has_dates = bool(
-            j.get('start_date', j.get('from', ''))
-            and j.get('end_date', j.get('to', ''))
-        )
-        new_quality = new_dur + (0.5 if has_dates else 0)
+        # Independently calculate duration from date strings
+        independent_dur = 0.0
+        if has_start:
+            _month_map = {
+                'jan': 1, 'january': 1, 'feb': 2, 'february': 2,
+                'mar': 3, 'march': 3, 'apr': 4, 'april': 4,
+                'may': 5, 'jun': 6, 'june': 6, 'jul': 7, 'july': 7,
+                'aug': 8, 'august': 8, 'sep': 9, 'sept': 9, 'september': 9,
+                'oct': 10, 'october': 10, 'nov': 11, 'november': 11,
+                'dec': 12, 'december': 12,
+            }
+            start_str = str(j.get('start_date', j.get('from', '')))
+            end_str = str(j.get('end_date', j.get('to', '')))
+
+            sy, sm = _parse_date_to_ym(start_str, _month_map)
+            if sy:
+                present_words_check = [
+                    'present', 'current', 'now', 'ongoing', 'till date',
+                    'till now', 'today', 'continuing',
+                ]
+                if not end_str or end_str.strip().lower() in present_words_check or end_str.strip() in ['-', '\u2013', '']:
+                    ey, em = CURRENT_YEAR, CURRENT_MONTH
+                else:
+                    ey, em = _parse_date_to_ym(end_str, _month_map)
+                    if not ey:
+                        ey, em = CURRENT_YEAR, CURRENT_MONTH
+
+                months = (ey - sy) * 12 + ((em or 6) - (sm or 6))
+                independent_dur = round(max(0, months / 12.0), 1)
+
+        new_quality = independent_dur + (1.0 if has_dates else 0) + (0.5 if has_start else 0)
 
         if company_norm in seen_companies:
             existing_idx = seen_companies[company_norm]
             existing = final_work[existing_idx]
 
-            existing_dur = 0.0
-            try:
-                existing_dur = float(existing.get('duration_years', 0) or 0)
-            except (ValueError, TypeError):
-                pass
+            # Calculate existing quality the same way
+            ex_has_start = bool(existing.get('start_date', existing.get('from', '')))
+            ex_has_end = bool(existing.get('end_date', existing.get('to', '')))
+            ex_has_dates = ex_has_start and ex_has_end
 
-            existing_has_dates = bool(
-                existing.get('start_date', existing.get('from', ''))
-                and existing.get('end_date', existing.get('to', ''))
-            )
-            existing_quality = existing_dur + (0.5 if existing_has_dates else 0)
+            ex_dur = 0.0
+            if ex_has_start:
+                ex_start = str(existing.get('start_date', existing.get('from', '')))
+                ex_end = str(existing.get('end_date', existing.get('to', '')))
+                esy, esm = _parse_date_to_ym(ex_start, _month_map)
+                if esy:
+                    if not ex_end or ex_end.strip().lower() in present_words_check or ex_end.strip() in ['-', '\u2013', '']:
+                        eey, eem = CURRENT_YEAR, CURRENT_MONTH
+                    else:
+                        eey, eem = _parse_date_to_ym(ex_end, _month_map)
+                        if not eey:
+                            eey, eem = CURRENT_YEAR, CURRENT_MONTH
+                    ex_months = (eey - esy) * 12 + ((eem or 6) - (esm or 6))
+                    ex_dur = round(max(0, ex_months / 12.0), 1)
+
+            existing_quality = ex_dur + (1.0 if ex_has_dates else 0) + (0.5 if ex_has_start else 0)
 
             if new_quality > existing_quality:
+                # Replace with better entry AND fix its duration_years
+                j["duration_years"] = independent_dur
                 final_work[existing_idx] = j
         else:
+            # Fix duration_years if we calculated it independently
+            if independent_dur > 0:
+                j["duration_years"] = independent_dur
             seen_companies[company_norm] = len(final_work)
             final_work.append(j)
 
     parsed["work_history"] = final_work
 
-    # Final experience calculation
+    # 7d: Final experience calculation — ALWAYS recalculate from dates
+    # Never trust LLM's total_experience_years or duration_years
     if final_work:
-        final_exp = _calculate_total_experience(final_work)
-        if final_exp > 0:
-            parsed["total_experience_years"] = final_exp
+        total_exp = 0.0
+        _month_map_final = {
+            'jan': 1, 'january': 1, 'feb': 2, 'february': 2,
+            'mar': 3, 'march': 3, 'apr': 4, 'april': 4,
+            'may': 5, 'jun': 6, 'june': 6, 'jul': 7, 'july': 7,
+            'aug': 8, 'august': 8, 'sep': 9, 'sept': 9, 'september': 9,
+            'oct': 10, 'october': 10, 'nov': 11, 'november': 11,
+            'dec': 12, 'december': 12,
+        }
+        present_words_final = [
+            'present', 'current', 'now', 'ongoing', 'till date',
+            'till now', 'today', 'continuing',
+        ]
+
+        for job in final_work:
+            if not isinstance(job, dict):
+                continue
+
+            start_str = str(job.get('start_date', job.get('from', '')))
+            end_str = str(job.get('end_date', job.get('to', '')))
+
+            if not start_str:
+                # Only use duration_years as last resort
+                dur = job.get("duration_years", 0)
+                try:
+                    total_exp += float(dur) if dur else 0
+                except (ValueError, TypeError):
+                    pass
+                continue
+
+            sy, sm = _parse_date_to_ym(start_str, _month_map_final)
+            if not sy:
+                dur = job.get("duration_years", 0)
+                try:
+                    total_exp += float(dur) if dur else 0
+                except (ValueError, TypeError):
+                    pass
+                continue
+
+            if not end_str or end_str.strip().lower() in present_words_final or end_str.strip() in ['-', '\u2013', '']:
+                ey, em = CURRENT_YEAR, CURRENT_MONTH
+            else:
+                ey, em = _parse_date_to_ym(end_str, _month_map_final)
+                if not ey:
+                    ey, em = CURRENT_YEAR, CURRENT_MONTH
+
+            months = (ey - sy) * 12 + ((em or 6) - (sm or 6))
+            job_years = round(max(0, months / 12.0), 1)
+            job["duration_years"] = job_years  # Fix the stored value too
+            total_exp += job_years
+
+        parsed["total_experience_years"] = round(total_exp, 1)
+    else:
+        # No work history at all
+        parsed["total_experience_years"] = 0
 
     # ══════ STEP 8: Current role/company ══════
     if not parsed.get("current_role") or not parsed.get("current_company"):
