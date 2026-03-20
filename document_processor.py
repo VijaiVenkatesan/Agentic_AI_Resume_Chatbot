@@ -125,112 +125,87 @@ def _clean_extracted_text(text: str) -> str:
 def _collapse_spaced_text(text: str) -> str:
     """
     Collapse text where characters are separated by spaces.
-    Handles PDF extraction artifacts like:
-    - "S A N K E T  R A J E N D R A  G A I K W A D" → "SANKET RAJENDRA GAIKWAD"
-    - "P y t h o n  D e v e l o p e r" → "Python Developer"
-    - "E D U C A T I O N" → "EDUCATION"
+    Handles: "S A N K E T  R A J E N D R A" → "SANKET RAJENDRA"
+    Also: "E D U C A T I O N" → "EDUCATION"
+    Also: "h t t p s : / / w w w . i b m . c o m" → "https://www.ibm.com"
     """
     if not text:
         return ""
-    
+
     lines = text.split('\n')
     result_lines = []
-    
+
     for line in lines:
         stripped = line.strip()
         if not stripped:
-            result_lines.append(line)
+            result_lines.append('')
             continue
-        
-        # Detect spaced-out text: pattern of "X Y Z" where most characters
-        # are single letters separated by spaces
-        # Check if line looks like spaced-out text
+
         if _is_spaced_out_line(stripped):
             collapsed = _collapse_spaced_line(stripped)
             result_lines.append(collapsed)
         else:
-            result_lines.append(line)
-    
+            result_lines.append(stripped)
+
     return '\n'.join(result_lines)
 
 
 def _is_spaced_out_line(line: str) -> bool:
-    """
-    Detect if a line has spaced-out characters.
-    "S A N K E T" → True
-    "Hello World" → False
-    """
+    """Detect if a line has spaced-out characters like 'S A N K E T'."""
     if not line or len(line) < 5:
         return False
-    
-    # Count single characters separated by spaces
-    parts = line.split(' ')
+
+    # Quick check: count ratio of spaces to non-spaces
+    spaces = line.count(' ')
+    non_spaces = len(line) - spaces
+    if non_spaces == 0:
+        return False
+
+    # In spaced-out text, spaces ≈ non-spaces (one space per character)
+    if spaces / max(non_spaces, 1) < 0.5:
+        return False
+
+    # Count single-char segments between spaces
+    parts = [p for p in line.split(' ') if p]  # filter empty from double-space
     if len(parts) < 3:
         return False
-    
-    # Count how many parts are single characters
-    single_chars = sum(1 for p in parts if len(p) == 1 and p.isalpha())
-    
-    # If more than 60% of parts are single characters, it's spaced out
-    if single_chars / len(parts) > 0.6:
-        return True
-    
-    # Also check for pattern: alternating single-char and space
-    # "P y t h o n" has chars at positions 0, 2, 4, 6...
-    non_space = [(i, c) for i, c in enumerate(line) if c != ' ']
-    if len(non_space) < 3:
-        return False
-    
-    # Check if most non-space characters are single (followed by space)
-    single_followed_by_space = 0
-    for i, (pos, char) in enumerate(non_space):
-        if char.isalpha():
-            # Check if next char is space or end of string
-            next_pos = pos + 1
-            if next_pos >= len(line) or line[next_pos] == ' ':
-                single_followed_by_space += 1
-    
-    ratio = single_followed_by_space / max(len(non_space), 1)
-    return ratio > 0.7
+
+    single_chars = sum(1 for p in parts if len(p) == 1)
+    ratio = single_chars / len(parts)
+
+    return ratio > 0.5
 
 
 def _collapse_spaced_line(line: str) -> str:
     """
-    Collapse a spaced-out line:
-    "S A N K E T  R A J E N D R A  G A I K W A D" → "SANKET RAJENDRA GAIKWAD"
-    "P y t h o n  D e v e l o p e r" → "Python Developer"
-    
-    Uses double-space as word boundary.
+    Collapse a spaced-out line using double-space as word boundary.
+    "S A N K E T  R A J E N D R A" → "SANKET RAJENDRA"
+    "h t t p s : / / w w w . i b m . c o m" → "https://www.ibm.com"
     """
     if not line:
         return line
-    
+
     # Split by double-space (or more) to find word boundaries
-    # "S A N K E T  R A J E N D R A" → ["S A N K E T", "R A J E N D R A"]
-    word_groups = re.split(r'\s{2,}', line.strip())
-    
+    word_groups = re.split(r' {2,}', line.strip())
+
     collapsed_words = []
     for group in word_groups:
         group = group.strip()
         if not group:
             continue
-        
-        # Check if this group is spaced-out single chars
+
         parts = group.split(' ')
+
+        # Check if all parts are single characters
         if all(len(p) <= 1 for p in parts if p):
             # Collapse: "S A N K E T" → "SANKET"
             word = ''.join(p for p in parts if p)
             collapsed_words.append(word)
         else:
-            # Check for mixed: "P y t h o n" (lowercase single chars)
-            if all(len(p) == 1 for p in parts if p):
-                word = ''.join(p for p in parts if p)
-                collapsed_words.append(word)
-            else:
-                # Not spaced out, keep as is
-                collapsed_words.append(group)
-    
-    result = ' '.join(collapsed_words)
+            # Mixed or normal text — keep as is
+            collapsed_words.append(group)
+
+    return ' '.join(collapsed_words)
     
     # Also handle cases where words within are separated by single space
     # but individual chars: "h t t p s : / / w w w . i b m . c o m"
@@ -333,6 +308,7 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
 
         # Post-process to fix common issues
         full_text = _post_process_pdf_text(full_text)
+        full_text = _collapse_spaced_text(full_text)
 
         return full_text.strip()
 
