@@ -2005,6 +2005,16 @@ def _extract_education_regex(text: str) -> List[Dict]:
     for pat, dt in degree_patterns:
         try:
             for match in re.finditer(pat, esec, re.IGNORECASE):
+                # ── FIX: Skip degree matches that are substrings of longer words ──
+                # Prevents "Ba" from "Bachelor", "ma" from "Information", etc.
+                m_start = match.start(1)
+                m_end = match.end(1)
+                if m_start > 0 and esec[m_start - 1].isalpha():
+                    continue
+                if m_end < len(esec) and esec[m_end].isalpha():
+                    continue
+                # ── End FIX ──
+
                 dn = match.group(1).strip() if match.group(1) else ""
                 fld = ""
                 if match.lastindex >= 2 and match.group(2):
