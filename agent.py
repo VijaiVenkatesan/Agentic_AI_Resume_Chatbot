@@ -95,6 +95,13 @@ SYNTHESIS_PROMPT = """You are a professional AI resume assistant. Current year i
    - Experience not found → "No work experience details available"
    - Contact not found → "Contact information not available in resume"
 
+8. **STAY ON TOPIC**:
+   - ONLY address what the user asked about
+   - Do NOT add unrelated sections that the user did not ask for
+   - If user asked about JD fit/comparison, ONLY discuss the JD match results — do NOT append Contact, Education, Skills, or Experience sections unless they are part of the comparison analysis
+   - If user asked about skills, ONLY discuss skills — do NOT add education or contact sections
+   - Keep responses focused and relevant to the question
+
 Tool results:
 {tool_results}
 
@@ -259,6 +266,13 @@ class ResumeAgent:
         except json.JSONDecodeError:
             tools = self._get_fallback_tools(question)
             reasoning = "Fallback planning based on question keywords"
+
+        # ── FIX: If LLM returned empty tools, use deterministic fallback ──
+        # This prevents the case where the LLM returns valid JSON but
+        # with an empty tools list, leaving the agent with no data to work with.
+        if not tools:
+            tools = self._get_fallback_tools(question)
+            reasoning = reasoning or "Fallback planning based on question keywords"
 
         # Filter out JD matcher if no JD uploaded
         if not self.has_jd:
