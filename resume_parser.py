@@ -398,29 +398,62 @@ def _parse_date_to_ym(date_str: str, month_map: Dict = None) -> Tuple[Optional[i
     if month_map is None:
         month_map = MONTH_MAP
     ds = date_str.strip().lower().strip('.,;:)( ')
+
+    # Check present/current keywords FIRST
+    present_variations = [
+        'till date', 'till now', 'to date', 'todate', 'tilldate',
+        'present', 'current', 'currently', 'now', 'ongoing',
+        'today', 'continuing', 'cont',
+    ]
     ds_clean = re.sub(r'[^a-z\s]', '', ds).strip()
-    if ds_clean in PRESENT_WORDS or any(pw in ds for pw in PRESENT_WORDS):
+    if ds_clean in PRESENT_WORDS:
         return CURRENT_YEAR, CURRENT_MONTH
-    m = re.search(r"(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*['\u2019]\s*(\d{2,4})", ds)
+    for pv in present_variations:
+        if pv in ds:
+            return CURRENT_YEAR, CURRENT_MONTH
+
+    # "Feb'23", "Oct'19", "Dec'2023"
+    m = re.search(r"(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*[',.\u2019]\s*(\d{2,4})", ds)
     if m:
         yr = int(m.group(2))
         if yr < 100:
             yr += 2000 if yr < 50 else 1900
         return yr, month_map.get(m.group(1)[:3], 6)
+
+    # "February 2023", "Oct 2019", "March, 2020"
     m = re.search(
         r'(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|'
-        r'aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)[.,]?\s*(\d{4})', ds)
+        r'aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)'
+        r'[.,]?\s*(\d{2,4})', ds)
     if m:
-        return int(m.group(2)), month_map.get(m.group(1)[:3], 6)
+        yr = int(m.group(2))
+        if yr < 100:
+            yr += 2000 if yr < 50 else 1900
+        return yr, month_map.get(m.group(1)[:3], 6)
+
+    # "Oct, 19" or "Feb, 23" — Month comma/space 2-digit year
+    m = re.search(
+        r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*[,.\s]+(\d{2})\b', ds)
+    if m:
+        yr = int(m.group(2))
+        yr += 2000 if yr < 50 else 1900
+        return yr, month_map.get(m.group(1)[:3], 6)
+
+    # "02/2023" or "12-2019"
     m = re.search(r'(\d{1,2})[/\-\.](\d{4})', ds)
     if m and 1 <= int(m.group(1)) <= 12:
         return int(m.group(2)), int(m.group(1))
+
+    # "2023/02" or "2019-10"
     m = re.search(r'(\d{4})[/\-\.](\d{1,2})', ds)
     if m and 1 <= int(m.group(2)) <= 12:
         return int(m.group(1)), int(m.group(2))
+
+    # Standalone 4-digit year
     m = re.search(r'((?:19|20)\d{2})', ds)
     if m:
         return int(m.group(1)), 6
+
     return None, None
 
 
@@ -428,12 +461,26 @@ def _calc_duration_from_dates(start_str: str, end_str: str) -> float:
     sy, sm = _parse_date_to_ym(start_str)
     if not sy:
         return 0.0
-    if not end_str or end_str.strip().lower() in PRESENT_WORDS or end_str.strip() in ['-', '\u2013', '']:
+
+    if not end_str:
         ey, em = CURRENT_YEAR, CURRENT_MONTH
     else:
-        ey, em = _parse_date_to_ym(end_str)
-        if not ey:
+        end_lower = end_str.strip().lower()
+        is_present = (
+            end_lower in ['-', '\u2013', ''] or
+            any(pw in end_lower for pw in [
+                'present', 'current', 'now', 'ongoing',
+                'till date', 'till now', 'to date',
+                'today', 'continuing'
+            ])
+        )
+        if is_present:
             ey, em = CURRENT_YEAR, CURRENT_MONTH
+        else:
+            ey, em = _parse_date_to_ym(end_str)
+            if not ey:
+                ey, em = CURRENT_YEAR, CURRENT_MONTH
+
     return round(max(0, ((ey - sy) * 12 + ((em or 6) - (sm or 6))) / 12.0), 1)
 
 
@@ -1409,8 +1456,8 @@ def _is_date_line(line: str) -> bool:
     if not line or not line.strip(): return False
     stripped = line.strip()
     for pat in [r'\d{1,2}[/\-\.]\d{4}\s*[-\u2013\u2014]\s*(?:\d{1,2}[/\-\.]\d{4}|[Pp]resent|[Cc]urrent)',
-                r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\.?\s*\d{4}\s*[-\u2013\u2014]\s*(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\.?\s*\d{4}|[Pp]resent|[Cc]urrent)',
-                r'(?:19|20)\d{2}\s*[-\u2013\u2014]\s*(?:(?:19|20)\d{2}|[Pp]resent|[Cc]urrent)']:
+                r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\.?\s*\d{2,4}\s*[-\u2013\u2014]\s*(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\.?\s*\d{2,4}|[Pp]resent|[Cc]urrent|[Tt]ill\s*[Dd]ate)',
+                r'(?:19|20)\d{2}\s*[-\u2013\u2014]\s*(?:(?:19|20)\d{2}|[Pp]resent|[Cc]urrent|[Tt]ill\s*[Dd]ate)']:
         m = re.search(pat, stripped, re.IGNORECASE)
         if m:
             remainder = stripped[:m.start()].strip() + stripped[m.end():].strip()
@@ -1419,153 +1466,421 @@ def _is_date_line(line: str) -> bool:
 
 
 def _extract_date_range(text: str) -> Tuple[str, str]:
-    if not text: return "", ""
-    for pat in [r'(\d{1,2}[/\-\.]\d{4})\s*[-\u2013\u2014]\s*(\d{1,2}[/\-\.]\d{4}|[Pp]resent|[Cc]urrent(?:ly)?|[Nn]ow|[Oo]ngoing)',
-                r'((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\.?\s*\d{4})\s*[-\u2013\u2014]\s*((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\.?\s*\d{4}|[Pp]resent|[Cc]urrent(?:ly)?|[Nn]ow|[Oo]ngoing)',
-                r'((?:19|20)\d{2})\s*[-\u2013\u2014]\s*((?:19|20)\d{2}|[Pp]resent|[Cc]urrent(?:ly)?|[Nn]ow|[Oo]ngoing)']:
-        m = re.search(pat, text, re.IGNORECASE)
-        if m: return m.group(1), m.group(2)
+    """Extract start and end dates from text. Handles all formats including:
+    - MM/YYYY - MM/YYYY
+    - Month Year - Month Year
+    - Month Year - Present/till date
+    - YYYY - YYYY
+    - "since DATE to till date"
+    - "from DATE to DATE"
+    - "Oct, 19 - Feb, 23" (abbreviated years)
+    """
+    if not text:
+        return "", ""
+
+    # Normalize "to till date" → "till date", "to present" stays
+    normalized = re.sub(r'\bto\s+till\s+date\b', 'till date', text, flags=re.IGNORECASE)
+    normalized = re.sub(r'\bto\s+till\s+now\b', 'till now', normalized, flags=re.IGNORECASE)
+
+    # Pattern 1: MM/YYYY - MM/YYYY or MM/YYYY - Present/till date
+    m = re.search(
+        r'(\d{1,2}[/\-\.]\d{4})\s*[-\u2013\u2014]\s*'
+        r'(\d{1,2}[/\-\.]\d{4}|[Pp]resent|[Cc]urrent(?:ly)?|[Nn]ow|[Oo]ngoing|[Tt]ill\s*[Dd]ate|[Tt]ill\s*[Nn]ow|[Tt]o\s*[Dd]ate)',
+        normalized, re.IGNORECASE)
+    if m:
+        return m.group(1), m.group(2)
+
+    # Pattern 2: "Month Year - Month Year" or "Month Year - Present/till date"
+    m = re.search(
+        r'((?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|'
+        r'Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)[.,]?\s*\d{4})\s*'
+        r'[-\u2013\u2014]\s*'
+        r'((?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|'
+        r'Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)[.,]?\s*\d{4}|'
+        r'[Pp]resent|[Cc]urrent(?:ly)?|[Nn]ow|[Oo]ngoing|[Tt]ill\s*[Dd]ate|[Tt]ill\s*[Nn]ow|[Tt]o\s*[Dd]ate)',
+        normalized, re.IGNORECASE)
+    if m:
+        return m.group(1), m.group(2)
+
+    # Pattern 3: "Mon, YY - Mon, YY" abbreviated years: "Oct, 19 - Feb, 23"
+    m = re.search(
+        r'((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*[,.\s]+\d{2})\s*'
+        r'[-\u2013\u2014]\s*'
+        r'((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*[,.\s]+\d{2}|'
+        r'[Pp]resent|[Cc]urrent(?:ly)?|[Nn]ow|[Oo]ngoing|[Tt]ill\s*[Dd]ate|[Tt]ill\s*[Nn]ow|[Tt]o\s*[Dd]ate)',
+        normalized, re.IGNORECASE)
+    if m:
+        return m.group(1), m.group(2)
+
+    # Pattern 4: "Mon'YY - Mon'YY": "Feb'23 - Present"
+    m = re.search(
+        r"((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*['\u2019]\s*\d{2,4})\s*"
+        r"[-\u2013\u2014]\s*"
+        r"((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*['\u2019]\s*\d{2,4}|"
+        r"[Pp]resent|[Cc]urrent(?:ly)?|[Nn]ow|[Oo]ngoing|[Tt]ill\s*[Dd]ate|[Tt]ill\s*[Nn]ow|[Tt]o\s*[Dd]ate)",
+        normalized, re.IGNORECASE)
+    if m:
+        return m.group(1), m.group(2)
+
+    # Pattern 5: "YYYY - YYYY" or "YYYY - Present/till date"
+    m = re.search(
+        r'((?:19|20)\d{2})\s*[-\u2013\u2014]\s*'
+        r'((?:19|20)\d{2}|[Pp]resent|[Cc]urrent(?:ly)?|[Nn]ow|[Oo]ngoing|[Tt]ill\s*[Dd]ate|[Tt]ill\s*[Nn]ow|[Tt]o\s*[Dd]ate)',
+        normalized, re.IGNORECASE)
+    if m:
+        return m.group(1), m.group(2)
+
+    # Pattern 6: "since/from DATE to till date" (captured via narrative patterns)
+    m = re.search(
+        r'(?:since|from)\s+((?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|'
+        r'Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)[.,]?\s*\d{2,4})\s+'
+        r'(?:to\s+)?'
+        r'((?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|'
+        r'Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)[.,]?\s*\d{2,4}|'
+        r'[Pp]resent|[Cc]urrent(?:ly)?|[Tt]ill\s*[Dd]ate|[Tt]ill\s*[Nn]ow|[Tt]o\s*[Dd]ate|[Nn]ow|[Oo]ngoing)',
+        normalized, re.IGNORECASE)
+    if m:
+        return m.group(1), m.group(2)
+
     return "", ""
 
 
+def _clean_company_for_work(raw: str) -> str:
+    """Clean company name — remove URLs, trailing location, etc."""
+    if not raw:
+        return ""
+    c = raw.strip()
+    c = re.sub(r'https?://\S+', '', c).strip()
+    c = re.sub(r'www\.[\w.-]+\.\w+/?', '', c).strip()
+    c = re.sub(r'[,;]\s*$', '', c).strip()
+    c = re.sub(r'\s*[-\u2013\u2014]\s*$', '', c).strip()
+    c = c.strip('-,. ;:•\u2022|/')
+    return c
+
+
 def _extract_work_experience_from_text(text: str) -> List[Dict]:
-    if not text: return []
+    """Extract work experience entries from resume text.
+
+    V11.1: Enhanced with narrative-first approach.
+    Handles ALL formats:
+    - "Currently working as X with Y since Feb 2023 to till date"
+    - "Ex Employee of Y from October 2019 to February 2023 as X"
+    - "Worked as X at Y from DATE to DATE"
+    - "Oct, 19 - Feb, 23" abbreviated dates
+    - Standard structured multi-line format
+    - Labeled format (Role:, Company:, Duration:)
+    """
+    if not text:
+        return []
+
     work_entries: List[Dict] = []
     seen_jobs: Set[str] = set()
+
+    # ── Date building blocks ──
+    MY = (r'(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|'
+          r'Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)[.,]?\s*\d{4}')
+    MY_SHORT = (r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*[,.\s]+\d{2}')
+    MY_APOS = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*['\u2019]\s*\d{2,4}"
+    ND = r'\d{1,2}[/\-\.]\d{4}'
+    NDR = r'\d{4}[/\-\.]\d{1,2}'
+    PK = (r'(?:[Pp]resent|[Cc]urrent(?:ly)?|[Nn]ow|[Oo]ngoing|'
+          r'[Tt]ill\s*[Dd]ate|[Tt]ill\s*[Nn]ow|[Tt]o\s*[Dd]ate|[Tt]oday|[Cc]ontinuing)')
+    JY = r'(?:19|20)\d{2}'
+    AD = f'(?:{MY}|{MY_SHORT}|{MY_APOS}|{ND}|{NDR}|{PK}|{JY})'
+    DS = r'\s*(?:to|till|until|[-\u2013\u2014])\s*'
 
     def _nk(r, c):
         return f"{re.sub(r'[^a-z0-9]', '', r.lower())[:25]}_{re.sub(r'[^a-z0-9]', '', c.lower())[:25]}"
 
     def _add(role, company, start, end, loc="", emp_type="Full-time"):
-        role, company = _clean_role_title(role), _clean_company_name(company)
-        if not _is_valid_work_entry({"title": role, "company": company}): return False
-        key = _nk(role, company)
-        if key in seen_jobs: return False
+        role = _clean_role_title(role)
+        company = _clean_company_for_work(company)
+        company = _clean_company_name(company)
+
+        if not role and not company:
+            return False
+        if role and not _is_valid_role_title(role):
+            return False
+        if company and not _is_valid_company_name(company):
+            return False
+        if not _is_valid_work_entry({"title": role or "Not specified", "company": company or "Not specified"}):
+            return False
+
+        key = _nk(role or "norole", company or "nocompany")
+        if key in seen_jobs:
+            return False
         seen_jobs.add(key)
         dur = _calc_duration_from_dates(start, end)
         ce = end.strip() if end.strip() and end.strip().lower() not in ['', '-', '\u2013', '\u2014'] else "Present"
-        work_entries.append({"title": role, "company": company, "location": loc, "start_date": start.strip(),
-                             "end_date": ce, "duration_years": dur, "type": emp_type, "description": "",
-                             "key_achievements": [], "technologies_used": []})
+        work_entries.append({
+            "title": role or "Not specified", "company": company or "Not specified",
+            "location": loc, "start_date": start.strip() if start else "",
+            "end_date": ce, "duration_years": dur, "type": emp_type,
+            "description": "", "key_achievements": [], "technologies_used": []
+        })
         return True
 
-    work_section = _extract_work_section(text)
-    if work_section:
-        ws_lines = work_section.split('\n')
-        i = 0
-        while i < len(ws_lines):
-            line = ws_lines[i].strip()
-            if not line or line.startswith(('•', '-', '*', '\u2022', '\u25e6', '\u2023', '\u2043')):
-                i += 1; continue
-            # Strategy A: Labeled format
-            rlm = re.match(r'^(?:Role|Position|Title|Designation)\s*[:]\s*(.+?)(?:\s*[\u2022•|]|$)', line, re.IGNORECASE)
-            clm = re.match(r'^(?:Company|Organization|Employer|Client)\s*[:]\s*(.+?)(?:\s*[\u2022•|]|$)', line, re.IGNORECASE)
-            if rlm or clm:
-                role, company, location, start_date, end_date, emp_type = "", "", "", "", "", "Full-time"
-                j = i
-                while j < len(ws_lines):
-                    cl = ws_lines[j].strip()
-                    if not cl: j += 1; continue
-                    if cl.startswith(('•', '-', '*', '\u2022', '\u25e6', '\u2023')): break
-                    rl = re.match(r'^(?:Role|Position|Title|Designation)\s*[:]\s*(.+)', cl, re.IGNORECASE)
-                    cm = re.match(r'^(?:Company|Organization|Employer|Client)\s*[:]\s*(.+)', cl, re.IGNORECASE)
-                    dl = re.match(r'^(?:Duration|Period|Tenure|Dates?|From|Timeline)\s*[:]\s*(.+)', cl, re.IGNORECASE)
-                    ll = re.match(r'^(?:Location|City|Place)\s*[:]\s*(.+)', cl, re.IGNORECASE)
-                    tlm = re.match(r'^(?:Type|Employment\s*Type|Mode)\s*[:]\s*(.+)', cl, re.IGNORECASE)
-                    if rl: role = _clean_role_title(rl.group(1).strip())
-                    elif cm: company = _clean_company_name(cm.group(1).strip())
-                    elif dl:
-                        s, e = _extract_date_range(dl.group(1).strip())
-                        if s: start_date, end_date = s, e
-                    elif ll: location = ll.group(1).strip()
-                    elif tlm: emp_type = tlm.group(1).strip()
-                    else:
-                        if _is_date_line(cl):
-                            s, e = _extract_date_range(cl)
-                            if s and not start_date: start_date, end_date = s, e
-                        elif _is_role_line(cl) and role: break
-                        elif _is_company_line(cl) and not company: company = _clean_company_name(cl)
-                        elif j > i + 1: break
-                    j += 1
-                if role or company:
-                    _add(role or "Not specified", company or "Not specified", start_date, end_date, location, emp_type)
-                i = j; continue
-            # Strategy B: Standard multi-line
-            if not _is_role_line(line):
-                i += 1; continue
-            role_line, emp_type = line, "Full-time"
-            tm = re.search(r'\s*[\u2022•\-|,]\s*(Full[-\s]?time|Part[-\s]?time|Internship|Contract|Freelance|Temporary)\s*$', role_line, re.IGNORECASE)
-            if tm:
-                emp_type = tm.group(1).strip()
-                role_line = role_line[:tm.start()].strip().rstrip('•\u2022-|, ')
-            role_line = _clean_role_title(role_line)
-            if not role_line or not _is_valid_role_title(role_line):
-                i += 1; continue
-            rs, re_ = _extract_date_range(line)
-            if rs:
-                role_line = re.sub(r'\s*\d{1,2}[/\-\.]\d{4}\s*[-\u2013\u2014].*$', '', role_line).strip().rstrip('•\u2022-|, ')
-            company, location, start_date, end_date = "", "", rs, re_
-            ll_limit, j, found_co, found_dt = min(i + 5, len(ws_lines)), i + 1, False, bool(rs)
-            while j < ll_limit:
-                nl = ws_lines[j].strip()
-                if not nl: j += 1; continue
-                if nl.startswith(('•', '-', '*', '\u2022', '\u25e6', '\u2023', '\u2043')): break
-                if _is_role_line(nl) and found_co: break
-                if _is_date_line(nl) and not found_dt:
-                    s, e = _extract_date_range(nl)
-                    if s: start_date, end_date, found_dt = s, e, True
-                    j += 1; continue
-                if not found_co:
-                    ls, le = _extract_date_range(nl)
-                    if ls:
-                        dm = re.search(r'\d{1,2}[/\-\.]\d{4}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)', nl, re.IGNORECASE)
-                        pd = nl[:dm.start()].strip().rstrip('•\u2022-|, ') if dm else nl
-                        if pd and not _looks_like_sentence_or_description(pd):
-                            parts = re.split(r'\s*[\u2022•]\s*', pd)
-                            parts = [p.strip() for p in parts if p.strip()]
+    # ══════════════════════════════════════════════════════
+    # PHASE 0: Narrative patterns on FULL TEXT (run FIRST!)
+    # These catch paragraph-format work descriptions anywhere
+    # ══════════════════════════════════════════════════════
+
+    # Pattern N1: "Currently working as ROLE with/at COMPANY since DATE to till date/present"
+    for m in re.finditer(
+        r'(?:currently\s+)?(?:working|employed|serving|associated)\s+'
+        r'(?:as\s+)?(?:a\s+)?(.+?)\s+'
+        r'(?:with|at|in|for)\s+(.+?)\s*'
+        r'(?:since|from)\s+(' + AD + r')\s*'
+        r'(?:to\s+)?(' + AD + r')'
+        r'(?:\s*[.\n,;]|$)',
+        text, re.IGNORECASE
+    ):
+        role = m.group(1).strip().rstrip('.,;')
+        company = m.group(2).strip().rstrip('.,;')
+        start = m.group(3).strip()
+        end = m.group(4).strip()
+        _add(role, company, start, end)
+
+    # Pattern N1b: "Currently working as ROLE with/at COMPANY since DATE" (no end = present)
+    if not work_entries:
+        for m in re.finditer(
+            r'(?:currently\s+)?(?:working|employed|serving|associated)\s+'
+            r'(?:as\s+)?(?:a\s+)?(.+?)\s+'
+            r'(?:with|at|in|for)\s+(.+?)\s*'
+            r'(?:since|from)\s+(' + AD + r')'
+            r'(?:\s*[.\n,;]|$)',
+            text, re.IGNORECASE
+        ):
+            role = m.group(1).strip().rstrip('.,;')
+            company = m.group(2).strip().rstrip('.,;')
+            start = m.group(3).strip()
+            _add(role, company, start, "Present")
+
+    # Pattern N2: "Ex Employee of COMPANY ...URL... from DATE to DATE as ROLE"
+    for m in re.finditer(
+        r'(?:ex|former|previous|past)\s+'
+        r'(?:employee|member|associate|consultant|staff)\s+'
+        r'(?:of|at|with|in)\s+(.+?)\s+'
+        r'(?:from|since)\s+(' + AD + r')' + DS + r'(' + AD + r')\s+'
+        r'(?:as|role|position|designation)\s+(.+?)'
+        r'(?:\s*[.\n,;]|$)',
+        text, re.IGNORECASE
+    ):
+        company = m.group(1).strip()
+        start = m.group(2).strip()
+        end = m.group(3).strip()
+        role = m.group(4).strip().rstrip('.,;')
+        _add(role, company, start, end)
+
+    # Pattern N2b: "Ex Employee of COMPANY from DATE to DATE" (no role specified inline)
+    for m in re.finditer(
+        r'(?:ex|former|previous|past)\s+'
+        r'(?:employee|member|associate|consultant|staff)\s+'
+        r'(?:of|at|with|in)\s+(.+?)\s+'
+        r'(?:from|since)\s+(' + AD + r')' + DS + r'(' + AD + r')'
+        r'(?:\s*[.\n,;]|$)',
+        text, re.IGNORECASE
+    ):
+        company = m.group(1).strip()
+        start = m.group(2).strip()
+        end = m.group(3).strip()
+        # Try to find role nearby
+        ctx_start = max(0, m.start() - 150)
+        ctx_end = min(len(text), m.end() + 150)
+        ctx = text[ctx_start:ctx_end]
+        role = ""
+        rm = re.search(r'(?:as|role|position|designation)[:\s]+(.+?)(?:\s*[.\n,;]|$)', ctx, re.IGNORECASE)
+        if rm:
+            role = rm.group(1).strip().rstrip('.,;')
+        co_key = re.sub(r'[^a-z0-9]', '', _clean_company_for_work(company).lower())[:20]
+        if co_key not in {re.sub(r'[^a-z0-9]', '', e.get('company', '').lower())[:20] for e in work_entries}:
+            _add(role or "Not specified", company, start, end)
+
+    # Pattern N3: "Worked/Employed as ROLE at/with COMPANY from DATE to DATE"
+    for m in re.finditer(
+        r'(?:worked|employed|served|joined|was|been)\s+'
+        r'(?:as\s+)?(?:a\s+)?(.+?)\s+'
+        r'(?:at|with|in|for)\s+(.+?)\s*'
+        r'(?:from|since)\s+(' + AD + r')' + DS + r'(' + AD + r')'
+        r'(?:\s*[.\n,;]|$)',
+        text, re.IGNORECASE
+    ):
+        role = m.group(1).strip().rstrip('.,;')
+        company = m.group(2).strip().rstrip('.,;')
+        start = m.group(3).strip()
+        end = m.group(4).strip()
+        if _is_valid_role_title(_clean_role_title(role)):
+            _add(role, company, start, end)
+
+    # Pattern N4: "ROLE at/with COMPANY, DATE - DATE" (tabular/inline)
+    for m in re.finditer(
+        r'^(.+?)\s+(?:at|with|@)\s+(.+?)\s*[,|]\s*(' + AD + r')' + DS + r'(' + AD + r')'
+        r'(?:\s*[.\n]|$)',
+        text, re.IGNORECASE | re.MULTILINE
+    ):
+        role = m.group(1).strip()
+        company = m.group(2).strip()
+        if len(role) <= _MAX_ROLE_LENGTH and len(company) <= _MAX_COMPANY_LENGTH:
+            if not any(s in role.lower() for s in ['education', 'project', 'skill', 'certification', 'award', 'summary']):
+                if _is_valid_role_title(_clean_role_title(role)):
+                    _add(role, company, m.group(3), m.group(4))
+
+    # Pattern N5: "COMPANY | ROLE | DATE - DATE" (pipe separated)
+    for m in re.finditer(
+        r'(.+?)\s*\|\s*(.+?)\s*\|\s*(' + AD + r')' + DS + r'(' + AD + r')'
+        r'(?:\s*[.\n]|$)',
+        text, re.IGNORECASE
+    ):
+        company = m.group(1).strip()
+        role = m.group(2).strip()
+        if len(role) <= _MAX_ROLE_LENGTH and len(company) <= _MAX_COMPANY_LENGTH:
+            if _is_valid_role_title(_clean_role_title(role)):
+                _add(role, company, m.group(3), m.group(4))
+
+    # ══════════════════════════════════════════════════════
+    # PHASE 1: Structured format parsing (section-aware)
+    # Only runs if narrative patterns found nothing
+    # ══════════════════════════════════════════════════════
+    if not work_entries:
+        work_section = _extract_work_section(text)
+        if work_section:
+            ws_lines = work_section.split('\n')
+            i = 0
+            while i < len(ws_lines):
+                line = ws_lines[i].strip()
+                if not line or line.startswith(('•', '-', '*', '\u2022', '\u25e6', '\u2023', '\u2043')):
+                    i += 1; continue
+
+                # Strategy A: Labeled format
+                rlm = re.match(r'^(?:Role|Position|Title|Designation)\s*[:]\s*(.+?)(?:\s*[\u2022•|]|$)', line, re.IGNORECASE)
+                clm = re.match(r'^(?:Company|Organization|Employer|Client)\s*[:]\s*(.+?)(?:\s*[\u2022•|]|$)', line, re.IGNORECASE)
+                if rlm or clm:
+                    role, company, location, start_date, end_date, emp_type = "", "", "", "", "", "Full-time"
+                    j = i
+                    while j < len(ws_lines):
+                        cl = ws_lines[j].strip()
+                        if not cl: j += 1; continue
+                        if cl.startswith(('•', '-', '*', '\u2022', '\u25e6', '\u2023')): break
+                        rl = re.match(r'^(?:Role|Position|Title|Designation)\s*[:]\s*(.+)', cl, re.IGNORECASE)
+                        cm = re.match(r'^(?:Company|Organization|Employer|Client)\s*[:]\s*(.+)', cl, re.IGNORECASE)
+                        dl = re.match(r'^(?:Duration|Period|Tenure|Dates?|From|Timeline)\s*[:]\s*(.+)', cl, re.IGNORECASE)
+                        ll = re.match(r'^(?:Location|City|Place)\s*[:]\s*(.+)', cl, re.IGNORECASE)
+                        tlm = re.match(r'^(?:Type|Employment\s*Type|Mode)\s*[:]\s*(.+)', cl, re.IGNORECASE)
+                        if rl: role = _clean_role_title(rl.group(1).strip())
+                        elif cm: company = _clean_company_for_work(cm.group(1).strip())
+                        elif dl:
+                            s, e = _extract_date_range(dl.group(1).strip())
+                            if s: start_date, end_date = s, e
+                        elif ll: location = ll.group(1).strip()
+                        elif tlm: emp_type = tlm.group(1).strip()
+                        else:
+                            if _is_date_line(cl):
+                                s, e = _extract_date_range(cl)
+                                if s and not start_date: start_date, end_date = s, e
+                            elif _is_role_line(cl) and role: break
+                            elif _is_company_line(cl) and not company: company = _clean_company_for_work(cl)
+                            elif j > i + 1: break
+                        j += 1
+                    if role or company:
+                        _add(role or "Not specified", company or "Not specified", start_date, end_date, location, emp_type)
+                    i = j; continue
+
+                # Strategy B: Standard multi-line
+                if not _is_role_line(line):
+                    i += 1; continue
+                role_line, emp_type = line, "Full-time"
+                tm = re.search(r'\s*[\u2022•\-|,]\s*(Full[-\s]?time|Part[-\s]?time|Internship|Contract|Freelance|Temporary)\s*$', role_line, re.IGNORECASE)
+                if tm:
+                    emp_type = tm.group(1).strip()
+                    role_line = role_line[:tm.start()].strip().rstrip('•\u2022-|, ')
+                role_line = _clean_role_title(role_line)
+                if not role_line or not _is_valid_role_title(role_line):
+                    i += 1; continue
+                rs, re_ = _extract_date_range(line)
+                if rs:
+                    role_line = re.sub(r'\s*\d{1,2}[/\-\.]\d{4}\s*[-\u2013\u2014].*$', '', role_line).strip().rstrip('•\u2022-|, ')
+                company, location, start_date, end_date = "", "", rs, re_
+                ll_limit, j, found_co, found_dt = min(i + 5, len(ws_lines)), i + 1, False, bool(rs)
+                while j < ll_limit:
+                    nl = ws_lines[j].strip()
+                    if not nl: j += 1; continue
+                    if nl.startswith(('•', '-', '*', '\u2022', '\u25e6', '\u2023', '\u2043')): break
+                    if _is_role_line(nl) and found_co: break
+                    if _is_date_line(nl) and not found_dt:
+                        s, e = _extract_date_range(nl)
+                        if s: start_date, end_date, found_dt = s, e, True
+                        j += 1; continue
+                    if not found_co:
+                        ls, le = _extract_date_range(nl)
+                        if ls:
+                            dm = re.search(r'\d{1,2}[/\-\.]\d{4}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)', nl, re.IGNORECASE)
+                            pd = nl[:dm.start()].strip().rstrip('•\u2022-|, ') if dm else nl
+                            if pd and not _looks_like_sentence_or_description(pd):
+                                parts = [p.strip() for p in re.split(r'\s*[\u2022•]\s*', pd) if p.strip()]
+                                if parts:
+                                    company = parts[0]
+                                    if len(parts) > 1: location = parts[-1]
+                            if not found_dt: start_date, end_date, found_dt = ls, le, True
+                            found_co = True
+                        elif _is_company_line(nl) or (not _is_role_line(nl) and not _looks_like_sentence_or_description(nl) and len(nl) < _MAX_COMPANY_LENGTH):
+                            parts = [p.strip() for p in re.split(r'\s*[\u2022•]\s*', nl) if p.strip()]
+                            parts = [p for p in parts if p.lower() not in ('full-time', 'part-time', 'internship', 'contract', 'freelance', 'temporary', 'full time', 'part time')]
                             if parts:
                                 company = parts[0]
-                                if len(parts) > 1: location = parts[-1]
-                        if not found_dt: start_date, end_date, found_dt = ls, le, True
-                        found_co = True
-                    elif _is_company_line(nl) or (not _is_role_line(nl) and not _looks_like_sentence_or_description(nl) and len(nl) < _MAX_COMPANY_LENGTH):
-                        parts = [p.strip() for p in re.split(r'\s*[\u2022•]\s*', nl) if p.strip()]
-                        parts = [p for p in parts if p.lower() not in ('full-time', 'part-time', 'internship', 'contract', 'freelance', 'temporary', 'full time', 'part time')]
-                        if parts:
-                            company = parts[0]
-                            for p in parts[1:]:
-                                s, e = _extract_date_range(p)
-                                if s and not found_dt: start_date, end_date, found_dt = s, e, True
-                                elif any(lw in p.lower() for lw in LOCATION_WORDS) or len(p.split()) <= 2: location = p
-                        found_co = True
-                j += 1
-            if role_line and (company or start_date):
-                company = _clean_company_name(company)
-                if company and not location:
-                    lm = re.search(r'\s*[\u2022•,]\s*(Pondicherry|Puducherry|Chennai|Hyderabad|Bangalore|Bengaluru|Mumbai|Delhi|Pune|Kolkata|Noida|Gurgaon|Gurugram|India)\s*$', company, re.IGNORECASE)
-                    if lm:
-                        location = lm.group(1).strip()
-                        company = company[:lm.start()].strip().rstrip(',•\u2022 ')
-                _add(role_line, company, start_date, end_date, location, emp_type)
-                i = j
-            else:
-                i += 1
-    # PHASE 2: Narrative patterns
+                                for p in parts[1:]:
+                                    s, e = _extract_date_range(p)
+                                    if s and not found_dt: start_date, end_date, found_dt = s, e, True
+                                    elif any(lw in p.lower() for lw in LOCATION_WORDS) or len(p.split()) <= 2: location = p
+                            found_co = True
+                    j += 1
+                if role_line and (company or start_date):
+                    company = _clean_company_for_work(company)
+                    company = _clean_company_name(company)
+                    if company and not location:
+                        lm = re.search(r'\s*[\u2022•,]\s*(Pondicherry|Puducherry|Chennai|Hyderabad|Bangalore|Bengaluru|Mumbai|Delhi|Pune|Kolkata|Noida|Gurgaon|Gurugram|India)\s*$', company, re.IGNORECASE)
+                        if lm:
+                            location = lm.group(1).strip()
+                            company = company[:lm.start()].strip().rstrip(',•\u2022 ')
+                    _add(role_line, company, start_date, end_date, location, emp_type)
+                    i = j
+                else:
+                    i += 1
+
+    # ══════════════════════════════════════════════════════
+    # PHASE 2: Narrative patterns on work section only
+    # (backup if Phase 0 missed due to section-specific text)
+    # ══════════════════════════════════════════════════════
     if not work_entries:
-        MY = r'(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)[.,]?\s*\d{4}'
-        ND = r'\d{1,2}[/\-\.]\d{4}'
-        NDR = r'\d{4}[/\-\.]\d{1,2}'
-        MA = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)['\u2019]\s*\d{2,4}"
-        PK = r'(?:[Pp]resent|[Cc]urrent(?:ly)?|[Nn]ow|[Oo]ngoing|[Tt]ill\s*[Dd]ate)'
-        JY = r'(?:19|20)\d{2}'
-        AD = f'(?:{MY}|{ND}|{NDR}|{MA}|{PK}|{JY})'
-        DS = r'\s*(?:to|till|until|[-\u2013\u2014])\s*'
-        for m in re.finditer(r'(?:currently\s+)?(?:working|employed|serving)\s+(?:as\s+)?(.+?)\s+(?:with|at|in|for)\s+(.+?)\s*(?:since|from)\s+(' + AD + r')' + DS + r'(' + AD + r')(?:\s*[.\n]|$)', text, re.IGNORECASE):
-            if _is_valid_role_title(_clean_role_title(m.group(1).strip())):
-                _add(m.group(1).strip(), m.group(2).strip(), m.group(3), m.group(4))
-        for m in re.finditer(r'(?:worked|employed|served|joined|was)\s+(?:as\s+)?(.+?)\s+(?:at|with|in|for)\s+(.+?)\s*(?:from|since)\s+(' + AD + r')' + DS + r'(' + AD + r')(?:[.\n,;]|$)', text, re.IGNORECASE):
-            if _is_valid_role_title(_clean_role_title(m.group(1).strip())):
-                _add(m.group(1).strip(), m.group(2).strip(), m.group(3), m.group(4))
+        work_section = _extract_work_section(text)
+        search_text = work_section if work_section else text
+
+        for m in re.finditer(
+            r'(?:currently\s+)?(?:working|employed|serving)\s+'
+            r'(?:as\s+)?(?:a\s+)?(.+?)\s+'
+            r'(?:with|at|in|for)\s+(.+?)\s*'
+            r'(?:since|from)\s+(' + AD + r')\s*'
+            r'(?:to\s+)?(' + AD + r')'
+            r'(?:\s*[.\n,;]|$)',
+            search_text, re.IGNORECASE
+        ):
+            role = m.group(1).strip().rstrip('.,;')
+            company = m.group(2).strip().rstrip('.,;')
+            if _is_valid_role_title(_clean_role_title(role)):
+                _add(role, company, m.group(3), m.group(4))
+
+        for m in re.finditer(
+            r'(?:worked|employed|served|joined|was|been)\s+'
+            r'(?:as\s+)?(?:a\s+)?(.+?)\s+'
+            r'(?:at|with|in|for)\s+(.+?)\s*'
+            r'(?:from|since)\s+(' + AD + r')' + DS + r'(' + AD + r')'
+            r'(?:\s*[.\n,;]|$)',
+            search_text, re.IGNORECASE
+        ):
+            role = m.group(1).strip().rstrip('.,;')
+            company = m.group(2).strip().rstrip('.,;')
+            if _is_valid_role_title(_clean_role_title(role)):
+                _add(role, company, m.group(3), m.group(4))
+
     return work_entries
 
 
