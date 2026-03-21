@@ -1573,43 +1573,119 @@ def _extract_work_experience_from_text(text: str) -> List[Dict]:
 #                    EDUCATION EXTRACTION
 # ═══════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════
+#      FIX: Year extraction — don't extract years from emails,
+#      phone numbers, or other non-education contexts
+# ═══════════════════════════════════════════════════════════════
+
+def _extract_year_from_context(ctx: str) -> str:
+    """Extract graduation/education year from context text.
+    
+    Avoids extracting years from:
+    - Email addresses (sanketrg1997@gmail.com)
+    - Phone numbers (+917498065716)
+    - PIN/ZIP codes (411046)
+    - URLs
+    - Non-education number sequences
+    """
+    if not ctx:
+        return ""
+
+    # First, remove content that commonly contains misleading numbers
+    # Remove emails
+    cleaned = re.sub(r'[\w._%+-]+@[\w.-]+\.[a-zA-Z]{2,}', ' ', ctx)
+    # Remove phone numbers
+    cleaned = re.sub(r'\+?\d{1,3}[-.\s]?\d{4,5}[-.\s]?\d{4,6}', ' ', cleaned)
+    cleaned = re.sub(r'\b\d{10,15}\b', ' ', cleaned)
+    # Remove URLs
+    cleaned = re.sub(r'https?://\S+', ' ', cleaned)
+    # Remove PIN/ZIP codes (5-6 digit numbers not near year context)
+    cleaned = re.sub(r'\b\d{5,6}\b', ' ', cleaned)
+
+    # Now try year patterns in order of specificity
+    yr_pats_strict = [
+        # "2013 - 2017" or "2013 to 2017" — date range (most reliable)
+        r'((?:19|20)\d{2})\s*[-\u2013to]+\s*((?:19|20)\d{2}|Present|Current|Expected|Pursuing)',
+        # "Class of 2017", "Batch 2017", "Graduated 2017"
+        r'(?:Class\s*of|Batch|Graduated?|Expected|Passing\s*(?:Year|Out))[:\s]*((?:19|20)\d{2})',
+        # "Year: 2017" or "Year of Passing: 2017"
+        r'(?:Year|Year\s*of\s*(?:Passing|Completion|Graduation))[:\s]*((?:19|20)\d{2})',
+        # MM/YYYY format near education context
+        r'(\d{1,2})[/\-\.]((?:19|20)\d{2})',
+        # Standalone 4-digit year — but ONLY if it's plausibly an education year
+        r'\b((?:19[5-9]\d|20[0-3]\d))\b',
+    ]
+
+    for yp in yr_pats_strict:
+        try:
+            ym = re.search(yp, cleaned, re.IGNORECASE)
+            if ym:
+                year_str = ym.group(0).strip()
+                # Validate the extracted year is reasonable for education
+                # Extract just the year number
+                year_num_match = re.search(r'((?:19|20)\d{2})', year_str)
+                if year_num_match:
+                    year_num = int(year_num_match.group(1))
+                    # Education years should be between 1950 and current year + 5
+                    if 1950 <= year_num <= CURRENT_YEAR + 5:
+                        return year_str
+        except re.error:
+            continue
+
+    return ""
+
+
 def _extract_education_regex(text: str) -> List[Dict]:
     education: List[Dict] = []
-    if not text: return education
+    if not text:
+        return education
+
     degree_patterns = [
         (r'((?:PG\.?\s*)?Bachelor\s*(?:of\s*)?(?:Science|Arts|Technology|Engineering|Commerce|Business|Computer\s*Applications?|Laws?)?)\s*(?:in\s*)?([\w\s,&]+)?', 'B'),
         (r'((?:PG\.?\s*)?B\.?\s*(?:Tech|E|Sc|A|Com|B\.?A|S|CA|BA|Arch|Pharm|Ed|Des)\.?)\s*(?:in\s*)?([\w\s,&]+)?', 'B'),
         (r'((?:PG\.?\s*)?B\.?Tech|BTech|B\.?E\.?|BE)\s*[-\u2013in\s]*([\w\s,&]+)?', 'B'),
-        (r'(BCA|B\.?C\.?A\.?)\s*(?:in\s*)?([\w\s,&]+)?', 'B'), (r'(BBA|B\.?B\.?A\.?)\s*(?:in\s*)?([\w\s,&]+)?', 'B'),
+        (r'(BCA|B\.?C\.?A\.?)\s*(?:in\s*)?([\w\s,&]+)?', 'B'),
+        (r'(BBA|B\.?B\.?A\.?)\s*(?:in\s*)?([\w\s,&]+)?', 'B'),
         (r'(B\.?Com|BCom)\s*(?:in\s*)?([\w\s,&]+)?', 'B'),
         (r'(Master\s*(?:of\s*)?(?:Science|Arts|Technology|Engineering|Business\s*Administration|Computer\s*Applications?)?)\s*(?:in\s*)?([\w\s,&]+)?', 'M'),
         (r'(M\.?\s*(?:Tech|E|Sc|A|B\.?A|S|CA|BA|Phil|Ed|Des)\.?|MBA|M\.?B\.?A\.?)\s*(?:in\s*)?([\w\s,&]+)?', 'M'),
         (r'(M\.?Tech|MTech|M\.?E\.?|ME|M\.?S\.?|MS)\s*[-\u2013in\s]*([\w\s,&]+)?', 'M'),
-        (r'(MCA|M\.?C\.?A\.?)\s*(?:in\s*)?([\w\s,&]+)?', 'M'), (r'(MBA|M\.?B\.?A\.?)\s*(?:in\s*)?([\w\s,&]+)?', 'M'),
+        (r'(MCA|M\.?C\.?A\.?)\s*(?:in\s*)?([\w\s,&]+)?', 'M'),
+        (r'(MBA|M\.?B\.?A\.?)\s*(?:in\s*)?([\w\s,&]+)?', 'M'),
         (r'(PG\s*(?:Diploma|Degree)?)\s*(?:in\s*)?([\w\s,&]+)?', 'M'),
         (r'(Ph\.?\s*D\.?|Doctorate|Doctor\s*of\s*Philosophy)\s*(?:in\s*)?([\w\s,&]+)?', 'P'),
-        (r'(Diploma)\s*(?:in\s*)?([\w\s,&]+)?', 'D'), (r'(Polytechnic)\s*(?:in\s*)?([\w\s,&]+)?', 'D'),
+        (r'(Diploma)\s*(?:in\s*)?([\w\s,&]+)?', 'D'),
+        (r'(Polytechnic)\s*(?:in\s*)?([\w\s,&]+)?', 'D'),
         (r'(ITI|I\.?T\.?I\.?)\s*(?:in\s*)?([\w\s,&]+)?', 'D'),
         (r'(Higher\s*Secondary|HSC|12th|XII|Intermediate|Senior\s*Secondary|\+2|Plus\s*Two)', 'S'),
         (r'(Secondary|SSC|SSLC|10th|X|Matriculation|High\s*School)', 'S'),
     ]
-    inst_pats = [r'([A-Z][A-Za-z\s\.\']+(?:University|College|Institute|School|Academy|Polytechnic))',
-                 r'((?:IIT|NIT|IIIT|BITS|VIT|SRM|Amity|Manipal|LPU|KIIT|MIT|Stanford|Harvard|Cambridge|Oxford)\s*[,]?\s*[\w\s]*)',
-                 r'(?:from|at|,)\s+([A-Z][A-Za-z\s\.\']{5,60})']
-    gpa_pats = [r'(?:GPA|CGPA|CPI|Grade)[:\s]*(\d+\.?\d*)', r'(\d{1,2}(?:\.\d+)?)\s*%',
-                r'(First\s*Class(?:\s*with\s*Distinction)?|Distinction|Honors?|Honours?)']
-    yr_pats = [r'((?:19|20)\d{2})\s*[-\u2013to]+\s*((?:19|20)\d{2}|Present|Current|Expected|Pursuing)',
-               r'(?:Class\s*of|Batch|Graduated?|Expected)[:\s]*((?:19|20)\d{2})', r'((?:19|20)\d{2})']
+    inst_pats = [
+        r'([A-Z][A-Za-z\s\.\']+(?:University|College|Institute|School|Academy|Polytechnic))',
+        r'((?:IIT|NIT|IIIT|BITS|VIT|SRM|Amity|Manipal|LPU|KIIT|MIT|Stanford|Harvard|Cambridge|Oxford)\s*[,]?\s*[\w\s]*)',
+        r'(?:from|at|,)\s+([A-Z][A-Za-z\s\.\']{5,60})',
+    ]
+    gpa_pats = [
+        r'(?:GPA|CGPA|CPI|Grade)[:\s]*(\d+\.?\d*)',
+        r'(\d{1,2}(?:\.\d+)?)\s*%',
+        r'(First\s*Class(?:\s*with\s*Distinction)?|Distinction|Honors?|Honours?)',
+    ]
+
     tu = text.upper()
     es = -1
     for mk in ['EDUCATION', 'ACADEMIC', 'QUALIFICATION', 'EDUCATIONAL BACKGROUND']:
         idx = tu.find(mk)
-        if idx != -1: es = idx; break
+        if idx != -1:
+            es = idx
+            break
     esec = text[es:] if es != -1 else text
     if es != -1:
         for mk in ['EXPERIENCE', 'WORK', 'EMPLOYMENT', 'SKILL', 'PROJECT', 'CERTIFICATION', 'AWARD', 'ACHIEVEMENT']:
             ei = esec.upper().find(mk, 50)
-            if ei != -1: esec = esec[:ei]; break
+            if ei != -1:
+                esec = esec[:ei]
+                break
+
     found: List[Dict] = []
     for pat, dt in degree_patterns:
         try:
@@ -1618,36 +1694,50 @@ def _extract_education_regex(text: str) -> List[Dict]:
                 fld = ""
                 if match.lastindex >= 2 and match.group(2):
                     fld = re.sub(r'\s+', ' ', match.group(2).strip())
-                    if len(fld) > 100: fld = fld[:100]
-                    if any(sw in fld.lower() for sw in ['university', 'college', 'institute', 'school', 'from', 'at', 'gpa', 'cgpa']): fld = ""
+                    if len(fld) > 100:
+                        fld = fld[:100]
+                    if any(sw in fld.lower() for sw in ['university', 'college', 'institute', 'school', 'from', 'at', 'gpa', 'cgpa']):
+                        fld = ""
                 ctx = esec[max(0, match.start() - 30):min(len(esec), match.end() + 250)]
                 entry = {"degree": dn, "field": fld, "institution": "", "year": "", "gpa": "", "location": "", "achievements": []}
+
                 for ip in inst_pats:
                     try:
                         im = re.search(ip, ctx, re.IGNORECASE)
                         if im:
                             inst = re.sub(r'\s+', ' ', im.group(1).strip())
                             if len(inst) > 5 and inst.lower() not in ['the', 'and', 'for', 'with', 'from']:
-                                entry["institution"] = inst; break
-                    except re.error: continue
-                for yp in yr_pats:
-                    try:
-                        ym = re.search(yp, ctx, re.IGNORECASE)
-                        if ym: entry["year"] = ym.group(0).strip(); break
-                    except re.error: continue
+                                entry["institution"] = inst
+                                break
+                    except re.error:
+                        continue
+
+                # Use safe year extraction
+                year_str = _extract_year_from_context(ctx)
+                if year_str:
+                    entry["year"] = year_str
+
                 for gp in gpa_pats:
                     try:
                         gm = re.search(gp, ctx, re.IGNORECASE)
-                        if gm: entry["gpa"] = gm.group(0).strip(); break
-                    except re.error: continue
+                        if gm:
+                            entry["gpa"] = gm.group(0).strip()
+                            break
+                    except re.error:
+                        continue
+
                 found.append(entry)
-        except re.error: continue
+        except re.error:
+            continue
+
     seen: Set[str] = set()
     for edu in found:
-        if not _is_valid_education_entry(edu): continue
+        if not _is_valid_education_entry(edu):
+            continue
         key = f"{_normalize_degree_key(edu.get('degree', '').lower())}_{edu.get('institution', '').lower()[:20]}"
         if key not in seen and edu.get('degree'):
-            seen.add(key); education.append(edu)
+            seen.add(key)
+            education.append(edu)
     return _deduplicate_education_entries(education)
 
 
