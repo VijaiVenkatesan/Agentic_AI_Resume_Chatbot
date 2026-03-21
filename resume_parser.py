@@ -1074,32 +1074,77 @@ def _is_valid_name(name: str) -> bool:
               "more about me", "about me"}:
         return False
     words = nc.split()
+
+    # Handle "M.SREEKANTH" or "K.Ravi" format — initial.name counts as 2 words
+    if len(words) == 1:
+        # Check for Initial.Name pattern: "M.SREEKANTH", "K.Ravi", "Dr.Smith"
+        dot_split = re.split(r'\.', nc)
+        dot_split = [p.strip() for p in dot_split if p.strip()]
+        if len(dot_split) >= 2:
+            # Treat as multi-word name: ["M", "SREEKANTH"]
+            words = dot_split
+        else:
+            return False
+
     if not (2 <= len(words) <= 4):
-        return False
+        # Also allow single initial + name: len could be 2 after dot split
+        if not (len(words) == 2):
+            return False
+
     for w in words:
         s = w.strip(".-'")
-        if not s or len(s) > 20 or sum(c.isalpha() for c in s) / max(len(s), 1) < 0.8:
+        if not s or len(s) > 20:
             return False
-    if sum(1 for c in nc if c.isalpha() or c.isspace()) / max(len(nc), 1) < 0.80:
+        # Allow single-letter initials
+        if len(s) == 1:
+            if not s.isalpha():
+                return False
+            continue
+        if sum(c.isalpha() for c in s) / max(len(s), 1) < 0.8:
+            return False
+    if sum(1 for c in nc if c.isalpha() or c.isspace() or c in '.-') / max(len(nc), 1) < 0.80:
         return False
-    if any(w.lower().strip(".,;:()") in _STRONG_NAME_BLACKLIST for w in words):
+    # Check blacklists — use the base words (strip periods)
+    check_words = [w.strip(".-'") for w in words]
+    if any(w.lower() in _STRONG_NAME_BLACKLIST for w in check_words if len(w) > 1):
         return False
-    if sum(1 for w in words if w.lower().strip(".,;:()") in _SOFT_NAME_BLACKLIST) >= 2:
+    if sum(1 for w in check_words if w.lower() in _SOFT_NAME_BLACKLIST and len(w) > 1) >= 2:
         return False
+    # Must have at least some uppercase
     if nc == nc.lower():
         return False
     return True
-
 
 def _clean_name(name: str) -> str:
     if not name:
         return ""
     name = re.sub(r'\s+', ' ', name).strip()
+    
+    # Handle ALL CAPS: "M.SREEKANTH" → "M.Sreekanth", "JOHN DOE" → "John Doe"
     if name.isupper():
-        name = name.title()
-    name = re.sub(r'\s*\.\s*', '. ', name)
+        # Preserve initials: "M.SREEKANTH" → split by dot, title-case non-initials
+        parts = name.split('.')
+        if len(parts) >= 2 and len(parts[0].strip()) <= 2:
+            # Initial.Name format
+            result_parts = []
+            for i, part in enumerate(parts):
+                part = part.strip()
+                if not part:
+                    continue
+                if len(part) <= 2:
+                    # It's an initial — keep uppercase
+                    result_parts.append(part.upper())
+                else:
+                    result_parts.append(part.title())
+            name = '.'.join(result_parts)
+        else:
+            name = name.title()
+    
+    name = re.sub(r'\s*\.\s*', '.', name)  # "M. Sreekanth" → "M.Sreekanth"
+    # But add space after dot if followed by a long name part: "M.Sreekanth" → "M. Sreekanth"
+    name = re.sub(r'\.([A-Z][a-z]{2,})', r'. \1', name)
+    
     return re.sub(r'\s+', ' ', name).strip()
-
 
 def _extract_name_from_text(text: str) -> str:
     if not text:
@@ -1113,50 +1158,133 @@ def _extract_name_from_text(text: str) -> str:
             'candidate', 'recruitment', 'hiring', 'vacancy', 'declaration', 'reference',
             'signature', 'company', 'corporation', 'limited', 'pvt', 'ltd',
             'more', 'voice', 'message', 'routing', 'optimization']
+
+    # Strategy 0: Extract name from lines that have "Name    Mobile/Email" format
+    # e.g., "M.SREEKANTH                   Mobile  :   8309833844"
+    for line in lines[:10]:
+        stripped = line.strip()
+        if not stripped or len(stripped) < 3:
+            continue
+        # Check if line contains contact labels with lots of spacing
+        contact_split = re.split(r'\s{3,}', stripped)  # Split on 3+ spaces
+        if len(contact_split) >= 2:
+            first_part = contact_split[0].strip()
+            rest = ' '.join(contact_split[1:]).lower()
+            # If the rest contains contact-related words, first part might be name
+            if any(kw in rest for kw in ['mobile', 'phone', 'email', 'tel', 'contact', 'cell']):
+                if first_part and len(first_part) >= 3 and len(first_part) <= 40:
+                    # Clean the candidate name
+                    candidate = first_part.strip()
+                    if candidate.isupper():
+                        candidate = candidate.title()
+                    if _is_valid_name(candidate):
+                        return _clean_name(candidate)
+
+    # Strategy 1: Labeled name
     for p in [r'(?:Name|Full Name|Candidate Name|Applicant Name)[\s.:]+([A-Z][a-zA-Z]+(?:\s+[A-Z]\.?\s*)?(?:\s+[A-Z][a-zA-Z]+){1,2})',
-              r'(?:Name|Full Name)[\s.:]+([A-Z][A-Z\s]+)']:
+              r'(?:Name|Full Name)[\s.:]+([A-Z][A-Z\s]+)',
+              # Also handle "Name : M.SREEKANTH" format
+              r'(?:Name|Full Name|Candidate Name)[\s.:]+([A-Z]\.?\s*[A-Z][a-zA-Z]+)',
+              r'(?:Name|Full Name|Candidate Name)[\s.:]+([A-Z][a-zA-Z]*\.[A-Z][a-zA-Z]+)']:
         m = re.search(p, text, re.IGNORECASE)
         if m and _is_valid_name(m.group(1).strip()):
             return _clean_name(m.group(1).strip())
+
+    # Strategy 1.5: ALL-CAPS multi-word name OR Initial.Name in first 20 lines
     for line in lines[:20]:
         line = line.strip()
-        if not line or len(line) < 5 or len(line) > 50: continue
-        if any(kw in line.lower() for kw in skip): continue
-        if '@' in line or 'http' in line.lower(): continue
-        if re.match(r'^\d', line) or len(re.findall(r'\d', line)) >= 3: continue
-        if _is_spaced_out_text(line): continue
-        if line.isupper() or (line == line.upper() and ' ' in line):
-            words = line.split()
+        if not line or len(line) < 3 or len(line) > 50:
+            continue
+        # First split by large gaps to isolate name from contact info
+        parts_by_space = re.split(r'\s{3,}', line)
+        candidate_line = parts_by_space[0].strip() if parts_by_space else line
+        if not candidate_line or len(candidate_line) < 3:
+            continue
+
+        if any(kw in candidate_line.lower() for kw in skip):
+            continue
+        if '@' in candidate_line or 'http' in candidate_line.lower():
+            continue
+        if re.match(r'^[\+\d\(\)]', candidate_line):
+            continue
+        if _is_spaced_out_text(candidate_line):
+            continue
+
+        # Check for Initial.Name format: "M.SREEKANTH", "K.Ravi Kumar"
+        initial_name = re.match(
+            r'^([A-Z]\.?\s*[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)$',
+            candidate_line
+        )
+        if initial_name:
+            candidate = initial_name.group(1).strip()
+            if candidate.isupper():
+                candidate = candidate.title()
+            # Handle "M.Sreekanth" → keep as-is if valid
+            if _is_valid_name(candidate):
+                return _clean_name(candidate)
+
+        # Check for ALL-CAPS names
+        if candidate_line.isupper() or (candidate_line == candidate_line.upper() and ' ' in candidate_line):
+            words = candidate_line.split()
             if 2 <= len(words) <= 4 and all(len(w) >= 2 and w.isalpha() for w in words):
-                tn = line.title()
+                tn = candidate_line.title()
                 if _is_valid_name(tn):
                     return _clean_name(tn)
+
+    # Strategy 2: First line that looks like a name
     for line in lines[:15]:
         line = line.strip()
-        if not line or len(line) < 4 or len(line) > 45: continue
-        if any(kw in line.lower() for kw in skip): continue
-        if re.match(r'^\d', line) or len(re.findall(r'\d', line)) >= 5: continue
-        if re.match(r'^[\+\d\(\)]', line) or '@' in line or 'http' in line.lower(): continue
-        if _is_spaced_out_text(line): continue
-        if sum(1 for c in line if c.isalpha() or c.isspace() or c in '.-') / max(len(line), 1) < 0.85: continue
+        # Split by large gaps first
+        parts_by_space = re.split(r'\s{3,}', line)
+        candidate_line = parts_by_space[0].strip() if parts_by_space else line
+
+        if not candidate_line or len(candidate_line) < 4 or len(candidate_line) > 45:
+            continue
+        if any(kw in candidate_line.lower() for kw in skip):
+            continue
+        if re.match(r'^\d', candidate_line) or len(re.findall(r'\d', candidate_line)) >= 5:
+            continue
+        if re.match(r'^[\+\d\(\)]', candidate_line) or '@' in candidate_line or 'http' in candidate_line.lower():
+            continue
+        if _is_spaced_out_text(candidate_line):
+            continue
+        if sum(1 for c in candidate_line if c.isalpha() or c.isspace() or c in '.-') / max(len(candidate_line), 1) < 0.85:
+            continue
         for p in [r'^[A-Z][a-z]+\s+[A-Z][a-z]+$', r'^[A-Z][a-z]+\s+[A-Z][a-z]+\s+[A-Z][a-z]+$',
                   r'^[A-Z][a-z]+\s+[A-Z]\.\s*[A-Z][a-z]+$', r'^[A-Z]+\s+[A-Z]+$',
                   r'^[A-Z]+\s+[A-Z]+\s+[A-Z]+$', r'^Dr\.\s*[A-Z][a-z]+\s+[A-Z][a-z]+$',
-                  r'^Mr\.\s*[A-Z][a-z]+\s+[A-Z][a-z]+$', r'^Ms\.\s*[A-Z][a-z]+\s+[A-Z][a-z]+$']:
-            if re.match(p, line) and _is_valid_name(line):
-                return _clean_name(line)
-        words = line.split()
+                  r'^Mr\.\s*[A-Z][a-z]+\s+[A-Z][a-z]+$', r'^Ms\.\s*[A-Z][a-z]+\s+[A-Z][a-z]+$',
+                  # Initial.Name patterns
+                  r'^[A-Z]\.[A-Z][a-zA-Z]+$', r'^[A-Z]\.\s*[A-Z][a-zA-Z]+$',
+                  r'^[A-Z]\.[A-Z][a-zA-Z]+\s+[A-Z][a-zA-Z]+$']:
+            if re.match(p, candidate_line) and _is_valid_name(candidate_line):
+                return _clean_name(candidate_line)
+        words = candidate_line.split()
         if 2 <= len(words) <= 4 and all(w[0].isupper() for w in words if w) and all(2 <= len(w) <= 15 for w in words):
-            if _is_valid_name(line):
-                return _clean_name(line)
+            if _is_valid_name(candidate_line):
+                return _clean_name(candidate_line)
+
+    # Strategy 3: First line mixed content
     if lines:
-        m = re.match(r'^([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?(?:\s+[A-Z][a-z]+){1,2})', lines[0].strip())
+        first = lines[0].strip()
+        # Split by large gaps
+        parts_by_space = re.split(r'\s{3,}', first)
+        first = parts_by_space[0].strip() if parts_by_space else first
+        # Try Initial.Name
+        m = re.match(r'^([A-Z]\.?\s*[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)', first)
         if m and _is_valid_name(m.group(1).strip()):
             return _clean_name(m.group(1).strip())
+        m = re.match(r'^([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?(?:\s+[A-Z][a-z]+){1,2})', first)
+        if m and _is_valid_name(m.group(1).strip()):
+            return _clean_name(m.group(1).strip())
+
+    # Strategy 4: "I am" / "My name is"
     for p in [r"(?:I am|I'm|My name is|This is|Myself)\s+([A-Z][a-z]+(?:\s+[A-Z]\.?\s*)?(?:\s+[A-Z][a-z]+){1,2})"]:
         m = re.search(p, text, re.IGNORECASE)
         if m and _is_valid_name(m.group(1).strip()):
             return _clean_name(m.group(1).strip())
+
+    # Strategy 5: From email
     em = re.search(r'([\w.]+)@', text)
     if em:
         parts = re.split(r'[._]', em.group(1))
@@ -1164,6 +1292,8 @@ def _extract_name_from_text(text: str) -> str:
             pn = ' '.join(p.capitalize() for p in parts if p.isalpha() and len(p) > 1)
             if len(pn.split()) >= 2:
                 return pn
+
+    # Strategy 6: ALL CAPS line (first 10 lines)
     headers = {'RESUME', 'CURRICULUM', 'VITAE', 'CV', 'OBJECTIVE', 'SUMMARY', 'EXPERIENCE', 'EDUCATION',
                'SKILLS', 'CONTACT', 'PROFILE', 'ABOUT', 'PROJECTS', 'CERTIFICATIONS', 'ACHIEVEMENTS',
                'AWARDS', 'REFERENCES', 'DECLARATION', 'PERSONAL', 'PROFESSIONAL', 'TECHNICAL', 'WORK',
@@ -1171,19 +1301,34 @@ def _extract_name_from_text(text: str) -> str:
                'MORE ABOUT ME', 'WORK EXPERIENCE', 'TECHNICAL SKILLS'}
     for line in lines[:10]:
         line = line.strip()
-        if line and line.isupper() and 5 <= len(line) <= 40:
-            words = line.split()
-            if 2 <= len(words) <= 4 and not any(h in line for h in headers):
-                tn = line.title()
-                if _is_valid_name(tn): return tn
+        # Split by large gaps
+        parts_by_space = re.split(r'\s{3,}', line)
+        candidate_line = parts_by_space[0].strip() if parts_by_space else line
+        if candidate_line and candidate_line.isupper() and 3 <= len(candidate_line) <= 40:
+            words = candidate_line.split()
+            if 1 <= len(words) <= 4 and not any(h in candidate_line for h in headers):
+                # Handle single-word Initial.Name
+                if len(words) == 1 and '.' in candidate_line:
+                    tn = candidate_line.title()
+                    if _is_valid_name(tn):
+                        return tn
+                elif len(words) >= 2:
+                    tn = candidate_line.title()
+                    if _is_valid_name(tn):
+                        return tn
+
+    # Strategy 7: Name after "Regards"
     for p in [r'(?:Regards|Sincerely|Yours\s+(?:truly|faithfully|sincerely)|Thank\s*(?:you|s)|Best\s+regards|Kind\s+regards|Warm\s+regards|Respectfully|Cordially)\s*[,.]?\s*\n\s*([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){1,3})']:
         m = re.search(p, text, re.IGNORECASE)
         if m and _is_valid_name(m.group(1).strip()):
             return _clean_name(m.group(1).strip())
+
+    # Strategy 8: Declaration
     for p in [r'(?:Declaration|I\s+hereby\s+declare).+?(?:Date|Location|Place|Regards)\s*[:\s]*\w*\s*\n\s*([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){1,3})\s*$']:
         m = re.search(p, text, re.IGNORECASE | re.DOTALL)
         if m and _is_valid_name(m.group(1).strip()):
             return _clean_name(m.group(1).strip())
+
     return ""
 
 
