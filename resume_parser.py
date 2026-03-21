@@ -2165,7 +2165,8 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
         try:
             from document_processor import extract_contacts_from_text
             doc_contacts = extract_contacts_from_text(resume_text)
-        except ImportError: pass
+        except ImportError:
+            pass
 
     headers = {"Authorization": f"Bearer {groq_api_key}", "Content-Type": "application/json"}
     payload = {"model": model_id, "messages": [
@@ -2255,111 +2256,250 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
         elif rsl: ls[cat] = rsl
     parsed["skills"] = ls
 
-    # Work experience — validate LLM entries
+    # ══════════════════════════════════════════════════════
+    # STEP 7: Work Experience (V11.1 — smart merge)
+    # ══════════════════════════════════════════════════════
+
+    # 7a: Validate LLM work entries + recalculate durations
     work_history = parsed.get("work_history", parsed.get("experience", []))
-    if not isinstance(work_history, list): work_history = []
-    validated = []
+    if not isinstance(work_history, list):
+        work_history = []
+    validated_llm = []
     for j in work_history:
-        if not isinstance(j, dict): continue
+        if not isinstance(j, dict):
+            continue
         title = _clean_role_title(str(j.get("title", "") or j.get("role", "") or j.get("position", "")).strip())
         company = _clean_company_name(str(j.get("company", "") or j.get("organization", "")).strip())
-        if not _is_valid_role_title(title): continue
-        if company and not _is_valid_company_name(company): continue
-        if not title and not company: continue
-        j["title"], j["company"] = title, company
-        validated.append(j)
-    work_history = validated
+        if not _is_valid_role_title(title):
+            continue
+        if company and not _is_valid_company_name(company):
+            continue
+        if not title and not company:
+            continue
+        j["title"] = title
+        j["company"] = company
+        # Recalculate duration from LLM dates if available
+        ss = str(j.get("start_date", "")).strip()
+        es = str(j.get("end_date", "")).strip()
+        if ss:
+            dur = _calc_duration_from_dates(ss, es)
+            if dur > 0:
+                j["duration_years"] = dur
+        validated_llm.append(j)
+    work_history = validated_llm
 
-    # Regex work + intelligent merge
+    # 7b: Run regex extraction
     regex_work = _extract_work_experience_from_text(resume_text)
+
+    # 7b: SMART merge — prefer entries WITH dates over those WITHOUT
     if regex_work:
-        if not work_history: work_history = regex_work
+        if not work_history:
+            work_history = regex_work
         else:
-            lck: Set[str] = {re.sub(r'[^a-z0-9]', '', str(j.get('company', '')).lower())[:20] for j in work_history} - {""}
+            # Build map of LLM entries by company key
+            llm_by_company: Dict[str, Dict] = {}
+            llm_by_index: Dict[str, int] = {}
+            for idx, j in enumerate(work_history):
+                co = str(j.get('company', '') or j.get('organization', '') or '').strip()
+                co_key = re.sub(r'[^a-z0-9]', '', co.lower())[:20]
+                if co_key:
+                    llm_by_company[co_key] = j
+                    llm_by_index[co_key] = idx
+
             for rj in regex_work:
-                co = re.sub(r'[^a-z0-9]', '', str(rj.get('company', '')).lower())[:20]
-                if co and co not in lck: work_history.append(rj); lck.add(co)
+                co = str(rj.get('company', '') or '').strip()
+                co_key = re.sub(r'[^a-z0-9]', '', co.lower())[:20]
+                if not co_key:
+                    continue
+
+                if co_key in llm_by_company:
+                    # Company exists in LLM results — compare and merge dates
+                    existing = llm_by_company[co_key]
+                    existing_ss = str(existing.get('start_date', '')).strip()
+                    existing_dur = 0
+                    try:
+                        existing_dur = float(existing.get('duration_years', 0) or 0)
+                    except (ValueError, TypeError):
+                        pass
+                    regex_ss = str(rj.get('start_date', '')).strip()
+                    regex_dur = 0
+                    try:
+                        regex_dur = float(rj.get('duration_years', 0) or 0)
+                    except (ValueError, TypeError):
+                        pass
+
+                    # If LLM has NO dates but regex has dates → copy regex dates to LLM entry
+                    if not existing_ss and regex_ss:
+                        existing['start_date'] = rj.get('start_date', '')
+                        existing['end_date'] = rj.get('end_date', '')
+                        existing['duration_years'] = regex_dur
+                        if not existing.get('location') and rj.get('location'):
+                            existing['location'] = rj['location']
+                    # If both have dates but regex has better duration → use regex dates
+                    elif existing_ss and regex_ss and regex_dur > existing_dur and existing_dur == 0:
+                        existing['start_date'] = rj.get('start_date', '')
+                        existing['end_date'] = rj.get('end_date', '')
+                        existing['duration_years'] = regex_dur
+                    # If LLM has duration 0 and regex has duration > 0 → use regex dates
+                    elif existing_dur == 0 and regex_dur > 0:
+                        existing['start_date'] = rj.get('start_date', '')
+                        existing['end_date'] = rj.get('end_date', '')
+                        existing['duration_years'] = regex_dur
+                else:
+                    # New company not in LLM — add it
+                    work_history.append(rj)
+                    llm_by_company[co_key] = rj
+
     parsed["work_history"] = work_history
 
-    # Dedup by company
+    # 7c: Dedup — keep best entry per company (with date bonus)
     final_work: List[Dict] = []
     seen_co: Dict[str, int] = {}
     for j in parsed.get("work_history", []):
-        if not isinstance(j, dict) or not _is_valid_work_entry(j): continue
+        if not isinstance(j, dict) or not _is_valid_work_entry(j):
+            continue
         co = _clean_company_name(j.get('company', '') or j.get('organization', '') or '')
         ti = j.get('title', '') or j.get('role', '') or j.get('position', '') or ''
         cw = [w for w in re.sub(r'[^a-z0-9\s]', '', co.lower()).split() if w not in LOCATION_WORDS and len(w) > 1]
         cn = ''.join(cw)[:20] or re.sub(r'[^a-z0-9]', '', ti.lower())[:20]
-        if not cn: final_work.append(j); continue
-        ss, es = str(j.get('start_date', j.get('from', ''))), str(j.get('end_date', j.get('to', '')))
+        if not cn:
+            final_work.append(j)
+            continue
+
+        ss = str(j.get('start_date', j.get('from', '')))
+        es = str(j.get('end_date', j.get('to', '')))
         idur = _calc_duration_from_dates(ss, es) if ss else 0.0
-        q = idur + (1.0 if ss and es else 0) + (0.5 if ss else 0) + (2.0 if ti and ti != "Not specified" else 0) + (2.0 if co and co != "Not specified" else 0) + (0.5 if j.get('description') else 0) + (0.5 if j.get('key_achievements') else 0)
-        if idur > 0: j["duration_years"] = idur
+
+        # Quality score — entries with dates get BIG bonus
+        q = idur
+        if ss and es: q += 1.0
+        if ss: q += 0.5
+        if ti and ti != "Not specified": q += 2.0
+        if co and co != "Not specified": q += 2.0
+        if j.get('description'): q += 0.5
+        if j.get('key_achievements'): q += 0.5
+        if idur > 0: q += 3.0  # CRITICAL: big bonus for having real dates
+
+        if idur > 0:
+            j["duration_years"] = idur
+
         if cn in seen_co:
-            ex = final_work[seen_co[cn]]
-            exs, exe = str(ex.get('start_date', ex.get('from', ''))), str(ex.get('end_date', ex.get('to', '')))
+            ei = seen_co[cn]
+            ex = final_work[ei]
+            exs = str(ex.get('start_date', ex.get('from', '')))
+            exe = str(ex.get('end_date', ex.get('to', '')))
             exd = _calc_duration_from_dates(exs, exe) if exs else 0.0
-            exq = exd + (1.0 if exs and exe else 0) + (0.5 if exs else 0) + (2.0 if (ex.get('title', '') or ex.get('role', '')) and (ex.get('title', '') or ex.get('role', '')) != "Not specified" else 0) + (2.0 if (ex.get('company', '') or ex.get('organization', '')) and (ex.get('company', '') or ex.get('organization', '')) != "Not specified" else 0) + (0.5 if ex.get('description') else 0) + (0.5 if ex.get('key_achievements') else 0)
-            if q > exq: final_work[seen_co[cn]] = j
-        else: seen_co[cn] = len(final_work); final_work.append(j)
+            ex_ti = ex.get('title', '') or ex.get('role', '') or ''
+            ex_co = ex.get('company', '') or ex.get('organization', '') or ''
+            exq = exd
+            if exs and exe: exq += 1.0
+            if exs: exq += 0.5
+            if ex_ti and ex_ti != "Not specified": exq += 2.0
+            if ex_co and ex_co != "Not specified": exq += 2.0
+            if ex.get('description'): exq += 0.5
+            if ex.get('key_achievements'): exq += 0.5
+            if exd > 0: exq += 3.0  # Same bonus for existing
+            if q > exq:
+                final_work[ei] = j
+        else:
+            seen_co[cn] = len(final_work)
+            final_work.append(j)
+
     parsed["work_history"] = final_work
 
-    # Recalculate total experience
+    # 7d: Recalculate total experience from dates
     total_exp = 0.0
     for job in final_work:
-        if not isinstance(job, dict): continue
-        ss, es = str(job.get("start_date", job.get("from", ""))), str(job.get("end_date", job.get("to", "")))
+        if not isinstance(job, dict):
+            continue
+        ss = str(job.get("start_date", job.get("from", "")))
+        es = str(job.get("end_date", job.get("to", "")))
         if ss:
             dur = _calc_duration_from_dates(ss, es)
-            if dur > 0: job["duration_years"] = dur; total_exp += dur; continue
-        try: total_exp += float(job.get("duration_years", 0) or 0)
-        except (ValueError, TypeError): pass
+            if dur > 0:
+                job["duration_years"] = dur
+                total_exp += dur
+                continue
+        try:
+            total_exp += float(job.get("duration_years", 0) or 0)
+        except (ValueError, TypeError):
+            pass
     parsed["total_experience_years"] = round(total_exp, 1)
 
-    # Extract from summary if still 0
+    # 7e: Extract experience from summary text if still 0
     if parsed.get("total_experience_years", 0) == 0:
         for ct in [parsed.get("professional_summary", "") or parsed.get("summary", "") or "", resume_text[:3000]]:
-            if not ct: continue
-            for ep in [r'(\d+)\s*\+?\s*years?\s*(?:of\s*)?(?:experience|exp)', r'over\s+(\d+)\s*years?',
-                       r'more\s+than\s+(\d+)\s*years?', r'nearly\s+(\d+)\s*years?', r'around\s+(\d+)\s*years?',
+            if not ct:
+                continue
+            for ep in [r'(\d+)\s*\+?\s*years?\s*(?:of\s*)?(?:experience|exp)',
+                       r'over\s+(\d+)\s*years?',
+                       r'more\s+than\s+(\d+)\s*years?',
+                       r'nearly\s+(\d+)\s*years?',
+                       r'around\s+(\d+)\s*years?',
                        r'experience\s*(?:of\s*)?(\d+)\s*\+?\s*years?']:
                 em = re.search(ep, ct.lower())
                 if em:
                     yrs = int(em.group(1))
-                    if 1 <= yrs <= 40: parsed["total_experience_years"] = float(yrs); break
-            if parsed.get("total_experience_years", 0) > 0: break
+                    if 1 <= yrs <= 40:
+                        parsed["total_experience_years"] = float(yrs)
+                        break
+            if parsed.get("total_experience_years", 0) > 0:
+                break
 
-    # Fallback work entry from header
+    # 7f: Fallback work entry from header
     if not parsed.get("work_history"):
         for line in resume_text.strip().split('\n')[:10]:
             line = line.strip()
-            if not line or len(line) < 5 or _is_spaced_out_text(line): continue
-            rm = re.match(r'^(.+?(?:Developer|Engineer|Analyst|Scientist|Manager|Designer|Architect|Consultant|Lead|Specialist|Administrator|Coordinator|Executive|Officer))\s*[,\-\u2013\u2014|]+\s*(.+?)(?:\s*[,\-\u2013\u2014|]+\s*.+)?$', line, re.IGNORECASE)
+            if not line or len(line) < 5 or _is_spaced_out_text(line):
+                continue
+            rm = re.match(
+                r'^(.+?(?:Developer|Engineer|Analyst|Scientist|Manager|Designer|Architect|'
+                r'Consultant|Lead|Specialist|Administrator|Coordinator|Executive|Officer))'
+                r'\s*[,\-\u2013\u2014|]+\s*(.+?)(?:\s*[,\-\u2013\u2014|]+\s*.+)?$',
+                line, re.IGNORECASE
+            )
             if rm:
-                role, company = _clean_role_title(rm.group(1).strip()), _clean_company_name(rm.group(2).strip())
-                if company and len(company) >= 2 and _is_valid_role_title(role) and _is_valid_company_name(company) and _is_valid_work_entry({"title": role, "company": company}):
+                role = _clean_role_title(rm.group(1).strip())
+                company = _clean_company_name(rm.group(2).strip())
+                if (company and len(company) >= 2
+                        and _is_valid_role_title(role)
+                        and _is_valid_company_name(company)
+                        and _is_valid_work_entry({"title": role, "company": company})):
                     ey = float(parsed.get("total_experience_years", 0) or 0)
-                    parsed["work_history"] = [{"title": role, "company": company, "location": "", "start_date": "", "end_date": "Present", "duration_years": ey if ey > 0 else 0, "type": "Full-time", "description": "", "key_achievements": [], "technologies_used": []}]
-                    if not parsed.get("current_role"): parsed["current_role"] = role
-                    if not parsed.get("current_company"): parsed["current_company"] = company
+                    parsed["work_history"] = [{
+                        "title": role, "company": company, "location": "",
+                        "start_date": "", "end_date": "Present",
+                        "duration_years": ey if ey > 0 else 0,
+                        "type": "Full-time", "description": "",
+                        "key_achievements": [], "technologies_used": []
+                    }]
+                    if not parsed.get("current_role"):
+                        parsed["current_role"] = role
+                    if not parsed.get("current_company"):
+                        parsed["current_company"] = company
                     break
 
-    # Current role/company
+    # STEP 8: Current role/company
     if not parsed.get("current_role") or not parsed.get("current_company"):
         wh = parsed.get("work_history", [])
         if isinstance(wh, list) and wh and isinstance(wh[0], dict):
-            if not parsed.get("current_role"): parsed["current_role"] = wh[0].get("title", "") or wh[0].get("role", "") or wh[0].get("position", "")
-            if not parsed.get("current_company"): parsed["current_company"] = wh[0].get("company", "") or wh[0].get("organization", "")
-    if parsed.get("current_role") and not _is_valid_role_title(parsed["current_role"]): parsed["current_role"] = ""
-    if parsed.get("current_company") and not _is_valid_company_name(parsed["current_company"]): parsed["current_company"] = ""
+            if not parsed.get("current_role"):
+                parsed["current_role"] = wh[0].get("title", "") or wh[0].get("role", "") or wh[0].get("position", "")
+            if not parsed.get("current_company"):
+                parsed["current_company"] = wh[0].get("company", "") or wh[0].get("organization", "")
+    if parsed.get("current_role") and not _is_valid_role_title(parsed["current_role"]):
+        parsed["current_role"] = ""
+    if parsed.get("current_company") and not _is_valid_company_name(parsed["current_company"]):
+        parsed["current_company"] = ""
 
-    # Defaults
+    # STEP 9: Defaults
     for f, d in {"name": "Unknown Candidate", "email": "", "phone": "", "address": "", "linkedin": "", "github": "",
                  "portfolio": "", "location": "", "current_role": "", "current_company": "", "total_experience_years": 0,
                  "professional_summary": "", "specializations": [], "skills": {}, "work_history": [], "education": [],
                  "certifications": [], "awards": [], "projects": [], "publications": [], "volunteer": [],
                  "languages": [], "interests": []}.items():
-        if f not in parsed: parsed[f] = d
+        if f not in parsed:
+            parsed[f] = d
     return parsed
 
 
