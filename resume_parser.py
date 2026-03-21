@@ -1802,6 +1802,10 @@ def _extract_skills_regex(text: str) -> Dict:
 #                    CONTACT VALIDATION & MERGE
 # ═══════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════
+#      FIX 1: _is_valid_field — stricter location validation
+# ═══════════════════════════════════════════════════════════════
+
 def _is_valid_field(field: str, value: str) -> bool:
     if not value:
         return False
@@ -1833,8 +1837,132 @@ def _is_valid_field(field: str, value: str) -> bool:
         if re.search(r'[A-Z]{3,}', v.split('/')[-1] if '/' in v else ''):
             return False
         return len(v) >= 5
+    if field == 'location':
+        return _is_valid_location(v)
+    if field == 'address':
+        return _is_valid_address(v)
     return len(v) >= 2
 
+
+# ═══════════════════════════════════════════════════════════════
+#      FIX 2: New location and address validators
+# ═══════════════════════════════════════════════════════════════
+
+def _is_valid_location(location: str) -> bool:
+    """Validate that a location string is actually a location, not garbage."""
+    if not location:
+        return False
+    loc = location.strip()
+
+    # Too short or too long
+    if len(loc) < 2 or len(loc) > 100:
+        return False
+
+    # Should not contain sign-off phrases
+    sign_off_patterns = [
+        r'regards', r'sincerely', r'thank\s*you', r'yours\s+truly',
+        r'yours\s+faithfully', r'best\s+regards', r'kind\s+regards',
+        r'warm\s+regards', r'respectfully', r'cordially',
+        r'declaration', r'i\s+hereby', r'signature',
+    ]
+    ll = loc.lower()
+    for pat in sign_off_patterns:
+        if re.search(pat, ll):
+            return False
+
+    # Should not contain person names after the location
+    # Pattern: "City Name, Person Name" or "City Regards, Person Name"
+    if re.search(r',\s*[A-Z][a-z]+\s+[A-Z][a-z]+', loc):
+        # Check if the part after comma looks like a person name
+        parts = loc.split(',', 1)
+        if len(parts) > 1:
+            after_comma = parts[1].strip()
+            # If the after-comma part has 2+ capitalized words, it's likely a name
+            name_words = re.findall(r'[A-Z][a-z]+', after_comma)
+            if len(name_words) >= 2:
+                return False
+
+    # Should not contain email/phone patterns
+    if '@' in loc or re.search(r'\d{7,}', loc):
+        return False
+
+    # Should not contain too many words (locations are typically 1-5 words)
+    words = loc.split()
+    if len(words) > 8:
+        return False
+
+    # Should not contain work-related terms
+    work_terms = {'developer', 'engineer', 'manager', 'analyst', 'consultant',
+                  'experience', 'skills', 'education', 'project', 'resume',
+                  'currently', 'working', 'employed', 'company', 'role',
+                  'position', 'responsibilities'}
+    if any(w.lower() in work_terms for w in words):
+        return False
+
+    return True
+
+
+def _is_valid_address(address: str) -> bool:
+    """Validate that an address string is actually an address."""
+    if not address:
+        return False
+    addr = address.strip()
+    if len(addr) < 10 or len(addr) > 250:
+        return False
+
+    # Should not contain sign-off phrases
+    ll = addr.lower()
+    sign_offs = ['regards', 'sincerely', 'thank you', 'yours truly',
+                 'declaration', 'i hereby']
+    for so in sign_offs:
+        if so in ll:
+            return False
+
+    return True
+
+
+# ═══════════════════════════════════════════════════════════════
+#      FIX 3: _clean_location — strip garbage from location values
+# ═══════════════════════════════════════════════════════════════
+
+def _clean_location(location: str) -> str:
+    """Clean a location string — remove sign-offs, names, garbage text."""
+    if not location:
+        return ""
+    loc = location.strip()
+
+    # Remove everything after sign-off keywords
+    sign_off_patterns = [
+        r'\s*[,.]?\s*(?:Regards|Sincerely|Thank\s*you|Yours|Best|Kind|Warm|Respectfully|Cordially).*$',
+        r'\s*[,.]?\s*(?:Declaration|I\s+hereby).*$',
+    ]
+    for pat in sign_off_patterns:
+        loc = re.sub(pat, '', loc, flags=re.IGNORECASE).strip()
+
+    # Remove trailing person name patterns: "Pune, Sanket Rajendra Gaikwad" → "Pune"
+    # Look for pattern: location text followed by comma and 2+ capitalized name words
+    name_trail = re.search(r'^(.+?)\s*[,]\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s*$', loc)
+    if name_trail:
+        candidate_loc = name_trail.group(1).strip()
+        candidate_name = name_trail.group(2).strip()
+        # Only strip if the "name" part looks like a real name (2+ words, all capitalized)
+        name_words = candidate_name.split()
+        if len(name_words) >= 2 and all(w[0].isupper() for w in name_words):
+            loc = candidate_loc
+
+    # Remove trailing punctuation
+    loc = loc.rstrip('.,;: ')
+
+    # Final validation
+    if len(loc) < 2:
+        return ""
+
+    return loc
+
+
+# ═══════════════════════════════════════════════════════════════
+#      FIX 4: Updated _merge_contacts — clean location from ALL sources
+# ═══════════════════════════════════════════════════════════════
 
 def _merge_contacts(llm: Dict, regex: Dict, doc: Optional[Dict] = None) -> Dict:
     merged: Dict[str, str] = {}
@@ -1845,11 +1973,23 @@ def _merge_contacts(llm: Dict, regex: Dict, doc: Optional[Dict] = None) -> Dict:
         dv = str(doc.get(f, "")).strip()
         rv = str(regex.get(f, "")).strip()
 
-        # Clean emails from ALL sources before validation
+        # Clean emails from ALL sources
         if f == 'email':
             lv = _clean_email(lv)
             dv = _clean_email(dv)
             rv = _clean_email(rv)
+
+        # Clean locations from ALL sources
+        if f == 'location':
+            lv = _clean_location(lv)
+            dv = _clean_location(dv)
+            rv = _clean_location(rv)
+
+        # Clean addresses from ALL sources
+        if f == 'address':
+            lv = _clean_location(lv)  # reuse same cleaner
+            dv = _clean_location(dv)
+            rv = _clean_location(rv)
 
         if lv and _is_valid_field(f, lv):
             merged[f] = lv
@@ -1913,7 +2053,9 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
                 "Only extract what is ACTUALLY WRITTEN in the resume. "
                 "For work_history, title must be a SHORT job title (e.g. 'Software Engineer'). "
                 "NEVER put sentences or descriptions as title or company. "
-                "For portfolio, only include personal websites, NOT employer company URLs."
+                "For portfolio, only include personal websites, NOT employer company URLs. "
+                "For location, return ONLY the city/state/country. "
+                "Do NOT include sign-offs, names, or 'Regards' text in location."
             )},
             {"role": "user", "content": PARSE_PROMPT.format(resume_text=resume_text[:12000])}
         ],
@@ -1967,6 +2109,20 @@ def parse_resume_with_llm(resume_text: str, groq_api_key: str,
     if parsed.get("portfolio"):
         if not _is_valid_field("portfolio", parsed["portfolio"]):
             parsed["portfolio"] = ""
+
+    # STEP 3d: Force-clean location regardless of source
+    if parsed.get("location"):
+        parsed["location"] = _clean_location(parsed["location"])
+        if not _is_valid_location(parsed["location"]):
+            parsed["location"] = ""
+
+    # STEP 3e: Force-clean address regardless of source
+    if parsed.get("address"):
+        cleaned_addr = _clean_location(parsed["address"])
+        if cleaned_addr and _is_valid_address(cleaned_addr):
+            parsed["address"] = cleaned_addr
+        elif not _is_valid_address(parsed["address"]):
+            parsed["address"] = ""
 
     # STEP 4: Name
     cn = parsed.get("name", "")
