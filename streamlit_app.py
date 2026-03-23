@@ -653,7 +653,7 @@ with st.sidebar:
                     st.rerun()
 
             with st.expander("👁️ View JD"):
-                st.text_area("JD", st.session_state.jd_text[:3000], height=150, disabled=True, label_visibility="collapsed")
+                st.text_area("JD", st.session_state.jd_text, height=200, disabled=True, label_visibility="collapsed")
 
         st.markdown("---")
 
